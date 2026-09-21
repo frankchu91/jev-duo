@@ -394,10 +394,14 @@ the README says so.
 | Site DOM changed | Adapter finds zero posts; popup shows "0 posts seen on this page" so the failure is visible |
 
 The last row is implemented by the `pageSeen` report: the content script
-sends its post count to the background after the initial scan and after
-any later scan that changes it (debounced, at most one per second); the
-background keeps the latest report per tab and returns them all from
-`getState`, and the popup shows the one for the tab it was opened over.
+sends its post count to the background after the initial scan, after any
+later scan that changes it (debounced, at most one per second), and
+unchanged every 30 s thereafter. The background keeps the latest report
+per tab (capped at 50) and returns them all from `getState`; the popup
+shows the one for the tab it was opened over. The map is mirrored to
+`chrome.storage.session` and re-read on start, because Chrome evicts an
+idle service worker after ~30 s and a memory-only map would lose exactly
+the report this row exists for — the page that produced nothing.
 
 ## 9. Testing strategy
 

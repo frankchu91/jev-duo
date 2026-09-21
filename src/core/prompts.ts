@@ -15,6 +15,10 @@ export function sanitizeForPrompt(text: string): string {
   return text.replace(/</g, '‹').replace(/>/g, '›').replace(/\s+/g, ' ');
 }
 
+/** `sanitizeForPrompt` for a field that may be absent, keeping `undefined` as `undefined` so
+ * `JSON.stringify` still drops it from the payload rather than emitting an empty string. */
+const sanitizeOptional = (text: string | undefined): string | undefined => (text === undefined ? undefined : sanitizeForPrompt(text));
+
 /** Builds the compile-time user message: the intent wrapped in <intent> tags, plus a JSON-lines <examples> block when corrections are available. `examples` is expected oldest -> newest (as `ExampleStore.list()` returns it), so the cap keeps the most recent `MAX_PROMPT_EXAMPLES`. */
 export function compileUser(intent: string, examples: Example[]): string {
   const recent = examples.slice(-MAX_PROMPT_EXAMPLES);
@@ -24,7 +28,9 @@ export function compileUser(intent: string, examples: Example[]): string {
         recent
           .map((e) => {
             const decision = e.actualDecision;
-            const whatFired = decision.kind === 'keep' ? 'nothing' : (decision.ruleId ?? 'unknown');
+            // `whatFired` is sanitised too: a stored example's ruleId is only checked for being a
+            // string (learner.ts), so `--with-feedback` can hand this one arbitrary text as well.
+            const whatFired = decision.kind === 'keep' ? 'nothing' : sanitizeForPrompt(decision.ruleId ?? 'unknown');
             return JSON.stringify({ text: sanitizeForPrompt(e.item.text).slice(0, 500), expected: e.expected, whatFired });
           })
           .join('\n') +
@@ -39,8 +45,11 @@ export const ARBITER_SYSTEM =
 
 /** Builds the arbiter user message: post + rules + keeps + Jev's own (ambiguous) verdict, wrapped in <arbiter> tags. */
 export function arbiterUser(item: Item, pack: QuestionPack, verdict: Verdict): string {
+  // Every string the item contributes is sanitised, not just `text`: an author is a free-form display
+  // name on X (the adapter falls back to it when there is no handle), and `platform` comes straight
+  // from the JSONL the CLI was pointed at. `meta` is numbers and booleans only, so it needs nothing.
   const payload = {
-    post: { platform: item.platform, author: item.author, text: sanitizeForPrompt(item.text).slice(0, 2000), meta: item.meta },
+    post: { platform: sanitizeForPrompt(item.platform), author: sanitizeOptional(item.author), text: sanitizeForPrompt(item.text).slice(0, 2000), meta: item.meta },
     rules: pack.rules.map((r) => ({ id: r.id, label: r.label, question: r.question })),
     keeps: pack.keeps.map((k) => ({ id: k.id, label: k.label, question: k.question })),
     fastModel: { rules: verdict.rules, keeps: verdict.keeps },

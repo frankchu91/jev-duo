@@ -4,17 +4,22 @@
 
 import type { DuoStats } from '../core/duo';
 import type { Verdict } from '../core/types';
-import { DEFAULT_SETTINGS, type Settings } from './messages';
+import { DEFAULT_SETTINGS, type PageSeenReport, type Settings } from './messages';
 
 const SETTINGS_KEY = 'settings';
 const EXAMPLES_KEY = 'examples';
 const STATS_KEY = 'stats';
 const VERDICTS_KEY = 'verdicts';
+const PAGE_SEEN_KEY = 'pageSeen';
 
 /** Cap on how many `[key, Verdict]` pairs `saveVerdicts` will persist to chrome.storage.session — also
  * the capacity background.ts gives its in-memory LruCache, so the cache itself never holds more than
  * this many entries and every flush is already within bounds. */
 export const MAX_VERDICTS = 2000;
+
+/** Cap on remembered per-tab `pageSeen` reports, in storage and in background.ts's live map. Tabs
+ * close without telling the service worker, so the set would otherwise only ever grow. */
+export const MAX_PAGE_REPORTS = 50;
 
 async function getLocal<T>(key: string): Promise<T | undefined> {
   const stored = await chrome.storage.local.get(key);
@@ -92,4 +97,25 @@ export async function loadVerdicts(): Promise<Array<[string, Verdict]>> {
  * storage.ts's own size contract holds regardless of what capacity a caller happens to configure. */
 export async function saveVerdicts(entries: Array<[string, Verdict]>): Promise<void> {
   await chrome.storage.session.set({ [VERDICTS_KEY]: entries.slice(-MAX_VERDICTS) });
+}
+
+function isPageSeenReport(x: unknown): x is PageSeenReport {
+  if (!isPlainObject(x)) return false;
+  return typeof x.tabId === 'number' && typeof x.platform === 'string' && typeof x.seen === 'number' && typeof x.at === 'string';
+}
+
+/** The per-tab "how many posts did the content script find" reports, oldest -> newest. They live in
+ * chrome.storage.session rather than only in memory because Chrome evicts an idle MV3 service worker
+ * after ~30 seconds: without this, a page whose adapter found nothing (the one case the popup most
+ * needs to report) would come back as "no page report yet" the moment the worker restarted. Garbage
+ * is filtered out the same way `loadVerdicts` does it — one bad entry must not break `init()`. */
+export async function loadPageSeen(): Promise<PageSeenReport[]> {
+  const stored = await chrome.storage.session.get(PAGE_SEEN_KEY);
+  const raw = stored[PAGE_SEEN_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isPageSeenReport).slice(-MAX_PAGE_REPORTS);
+}
+
+export async function savePageSeen(reports: PageSeenReport[]): Promise<void> {
+  await chrome.storage.session.set({ [PAGE_SEEN_KEY]: reports.slice(-MAX_PAGE_REPORTS) });
 }

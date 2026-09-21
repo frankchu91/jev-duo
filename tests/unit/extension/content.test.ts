@@ -51,6 +51,7 @@ function runContentScript(doc: Document, loc: Location, sendFake: (req: Request)
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe('startContentScript', () => {
@@ -263,6 +264,30 @@ describe('startContentScript', () => {
       { type: 'pageSeen', platform: 'x', seen: 7 },
     ]);
     script.stop();
+  });
+
+  // The background's map of reports is per service worker, and Chrome restarts that worker freely
+  // (and empties the map on an extension reload), so a page whose count never changes — a broken
+  // adapter stuck at 0 above all — has to keep saying so rather than report once and go quiet.
+  it('re-states the same count every 30s, and stops doing it after stop()', async () => {
+    vi.useFakeTimers();
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send);
+    const reports = () => calls.filter((c) => c.type === 'pageSeen');
+    expect(reports()).toHaveLength(1); // the initial one
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(reports()).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(reports()).toHaveLength(3);
+    expect(reports()).toEqual(Array.from({ length: 3 }, () => ({ type: 'pageSeen', platform: 'x', seen: 6 })));
+
+    script.stop();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(reports()).toHaveLength(3); // the interval is cleared with everything else
   });
 
   // Two elements can carry the same item id (a quoted or reposted tweet renders twice). The first copy

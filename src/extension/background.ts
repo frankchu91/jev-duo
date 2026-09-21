@@ -24,7 +24,7 @@ import { resolveProviders } from '../core/providers/resolve';
 import type { JevProvider, LlmProvider } from '../core/providers/types';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
 import type { PageSeenReport, Request, Response, Sender, Settings, SiteId } from './messages';
-import { loadExamples, loadSettings, loadStats, loadVerdicts, MAX_VERDICTS, saveExamples, saveSettings, saveStats, saveVerdicts } from './storage';
+import { loadExamples, loadPageSeen, loadSettings, loadStats, loadVerdicts, MAX_PAGE_REPORTS, MAX_VERDICTS, saveExamples, savePageSeen, saveSettings, saveStats, saveVerdicts } from './storage';
 
 interface Resolved {
   jev: JevProvider;
@@ -36,10 +36,6 @@ interface Resolved {
  * produces a judge every few hundred ms and each flush rewrites the WHOLE cache (up to MAX_VERDICTS
  * entries), so writing per judge amplifies one batch of 10 posts into one full-cache write. */
 const VERDICT_FLUSH_MS = 2000;
-
-/** Cap on remembered per-tab `pageSeen` reports. Tabs close without telling the service worker, so
- * this map would otherwise grow for as long as the worker lives. */
-const MAX_PAGE_REPORTS = 50;
 
 /** `chrome-extension://<id>`, the origin every page of this extension reports as `sender.origin` —
  * the action popup, an options page, popup.html opened in a tab. Undefined only when there is no
@@ -103,7 +99,9 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
   let cache: LruCache<Verdict>;
 
   // Latest `pageSeen` report per tab, insertion-ordered oldest -> newest so the cap can drop the
-  // least recently reporting tab. Memory only: a report is meaningless once the worker restarts.
+  // least recently reporting tab. Mirrored to chrome.storage.session (and re-read by init) because
+  // Chrome evicts an idle service worker after ~30 seconds, and the report the popup most needs —
+  // "this page produced no posts at all" — would otherwise vanish with it.
   const pageSeen = new Map<number, { platform: SiteId; seen: number; at: string }>();
 
   // Tracks every judge() call currently in flight (from just before it starts until its stats/cache
@@ -183,8 +181,9 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
   }
 
   async function init(): Promise<void> {
-    const [loadedSettings, loadedExamples, verdictEntries] = await Promise.all([loadSettings(), loadExamples(), loadVerdicts()]);
+    const [loadedSettings, loadedExamples, verdictEntries, seenReports] = await Promise.all([loadSettings(), loadExamples(), loadVerdicts(), loadPageSeen()]);
     await loadStats(); // loaded for parity with settings/examples; DuoAgent has no counter-seeding hook to feed it into
+    for (const { tabId, ...report } of seenReports) pageSeen.set(tabId, report);
     cache = new LruCache<Verdict>(MAX_VERDICTS);
     // settings/agent are assigned BEFORE the cache warm below: loadVerdicts() already filters to
     // well-formed entries, but the warm is still wrapped in its own try/catch so that even an
@@ -258,7 +257,13 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     const saved = await saveSettings(patch);
 
     await waitForInFlightJudges(); // let any judge still using the OLD agent/cache finish first
-    await flushVerdictsNow(); // ...and land its (debounced) mirror write before the cache can change
+    try {
+      await flushVerdictsNow(); // ...and land its (debounced) mirror write before the cache can change
+    } catch {
+      // `saveSettings` has already committed, so throwing here would leave the persisted settings
+      // ahead of the live agent until the next restart. A lost verdict-cache mirror is a cache miss;
+      // a skipped rebuild is the popup and the content script disagreeing about the settings.
+    }
 
     if (providersMayHaveChanged(before, saved)) {
       // The verdict cache key carries no provider identity, so a probability cached under the old
@@ -280,14 +285,21 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
   }
 
   /** Records one content script's post count for its tab, dropping the least recently reporting tab
-   * once the cap is reached (delete-then-set keeps insertion order == recency). */
-  function recordPageSeen(tabId: number, platform: SiteId, seen: number): void {
+   * once the cap is reached (delete-then-set keeps insertion order == recency), and mirrors the
+   * result to session storage so it outlives this service worker. A failed mirror write is logged
+   * and swallowed: the live map is still correct, and losing a report is not worth failing on. */
+  async function recordPageSeen(tabId: number, platform: SiteId, seen: number): Promise<void> {
     pageSeen.delete(tabId);
     pageSeen.set(tabId, { platform, seen, at: new Date().toISOString() });
     while (pageSeen.size > MAX_PAGE_REPORTS) {
       const oldest = pageSeen.keys().next().value;
       if (oldest === undefined) break;
       pageSeen.delete(oldest);
+    }
+    try {
+      await savePageSeen(pageSeenReports());
+    } catch (err) {
+      console.error('jev-duo background: page-seen mirror write failed', err);
     }
   }
 
@@ -313,7 +325,7 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       case 'pageSeen':
         // No tab id (e.g. driven through the test hook rather than onMessage): nothing to key on, so
         // the report is acknowledged and dropped rather than failing the content script's send.
-        if (sender?.tab?.id !== undefined) recordPageSeen(sender.tab.id, req.platform, req.seen);
+        if (sender?.tab?.id !== undefined) await recordPageSeen(sender.tab.id, req.platform, req.seen);
         return { ok: true, type: 'pageSeen' };
       case 'setSettings':
         return enqueueMutation(() => handleSetSettings(req.patch));

@@ -184,6 +184,26 @@ describe('background', () => {
       expect(second.verdicts[0]).toMatchObject({ source: 'cache', decision: { kind: 'fold', ruleId: 'spam' } });
     });
 
+    // saveSettings has already committed by the time the verdict mirror is flushed, so a rejecting
+    // chrome.storage.session must not abort the rebuild: the persisted settings would then be ahead
+    // of the live agent (and of every judge it makes) until the next service-worker restart.
+    it('still rebuilds the agent when flushing the verdict mirror throws', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'compile', intent: 'Hide spam.' });
+      await bg.handle({ type: 'judge', items: [mkItem('a')] }); // schedules the debounced flush
+
+      vi.spyOn(chrome.storage.session, 'set').mockRejectedValue(new Error('session storage is full'));
+
+      const res = await bg.handle({ type: 'setSettings', patch: { strictness: 0.9 } });
+      expect(res).toEqual({ ok: true, type: 'setSettings' });
+
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.settings.strictness).toBe(0.9); // the patch reached the live agent, not just storage
+      expect(state.stats.judged).toBe(0); // ...via a real rebuild
+    });
+
     it('rebuilds the agent but keeps the compiled pack and accumulated examples', async () => {
       const bg = createBackground();
       await bg.ready;
@@ -585,6 +605,32 @@ describe('background', () => {
       if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
       expect(state.pageSeen).toHaveLength(50);
       expect(state.pageSeen.map((r) => r.tabId)).toEqual(Array.from({ length: 50 }, (_, i) => i + 6));
+    });
+
+    // Chrome evicts an idle MV3 service worker after ~30 seconds. A memory-only map meant that the
+    // popup showed "no page report yet" instead of "0 posts seen on this page" in precisely the case
+    // the line exists for: a broken adapter, on a page quiet enough for the worker to be evicted.
+    it('survives a service-worker restart: a fresh background reads the reports back from session storage', async () => {
+      const first = createBackground();
+      await first.ready;
+      await first.handle({ type: 'pageSeen', platform: 'hn', seen: 0 }, { tab: { id: 4 } });
+
+      const second = createBackground(); // same session storage, brand new in-memory state
+      await second.ready;
+      const state = await second.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.pageSeen).toEqual([expect.objectContaining({ tabId: 4, platform: 'hn', seen: 0 })]);
+    });
+
+    it('a garbled pageSeen store never breaks init, and well-formed entries still survive', async () => {
+      await chrome.storage.session.set({
+        pageSeen: ['nope', null, { tabId: 'x', platform: 'hn', seen: 0, at: 'now' }, { tabId: 5 }, { tabId: 6, platform: 'x', seen: 2, at: 'now' }],
+      });
+      const bg = createBackground();
+      await bg.ready;
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.pageSeen).toEqual([{ tabId: 6, platform: 'x', seen: 2, at: 'now' }]);
     });
 
     it('a report with no tab id (not from a content script) is acknowledged and dropped', async () => {

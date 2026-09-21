@@ -15,6 +15,11 @@ const MAX_BATCH = 10;
 /** Minimum gap between `pageSeen` reports after the initial one. A feed mutates constantly; the popup
  * only needs to know whether this page is producing posts at all, so one report per second is plenty. */
 const SEEN_REPORT_MS = 1000;
+/** How often the current count is re-sent even when nothing has changed. The background mirrors
+ * reports to session storage, but an extension reload (or an update) starts it from an empty map
+ * while this page keeps running, and a page whose count never changes — most of all a broken adapter
+ * stuck at 0 — would then never be heard from again. */
+const SEEN_HEARTBEAT_MS = 30_000;
 /** How many times a post may extract to `null` before content.ts gives up on it and marks it seen
  * anyway. Without a cap, a post that will never be judgeable (e.g. a pure-media tweet with no
  * tweetText) gets re-extracted on every single MutationObserver scan for as long as it stays in the
@@ -26,7 +31,7 @@ interface Pending { el: Element; targets: Element[]; item: Item }
 export function startContentScript(
   doc: Document,
   loc: Location,
-  deps: { send: typeof send; debounceMs?: number; maxBatch?: number; seenReportMs?: number },
+  deps: { send: typeof send; debounceMs?: number; maxBatch?: number; seenReportMs?: number; seenHeartbeatMs?: number },
 ): { stop(): void; seen(): number } {
   const picked: Adapter | undefined = pickAdapter(new URL(loc.href));
   if (!picked) return { stop() {}, seen: () => 0 };
@@ -35,6 +40,7 @@ export function startContentScript(
   const debounceMs = deps.debounceMs ?? DEBOUNCE_MS;
   const maxBatch = deps.maxBatch ?? MAX_BATCH;
   const seenReportMs = deps.seenReportMs ?? SEEN_REPORT_MS;
+  const seenHeartbeatMs = deps.seenHeartbeatMs ?? SEEN_HEARTBEAT_MS;
 
   // A WeakSet plus a counter, not a Set: on an infinite feed the strong Set kept every post element
   // the user ever scrolled past alive for the life of the tab, even after the site recycled it out of
@@ -92,9 +98,10 @@ export function startContentScript(
   }
 
   /** Tells the background how many posts this page has produced, so the popup can say "0 posts seen
-   * on this page" when a site's DOM has changed under an adapter (spec §8). Only sends on a change. */
-  function reportSeen(): void {
-    if (seenCount === reportedSeen) return;
+   * on this page" when a site's DOM has changed under an adapter (spec §8). Sends only when the count
+   * has changed, unless `force` (the heartbeat below, which re-states an unchanged count). */
+  function reportSeen(force = false): void {
+    if (!force && seenCount === reportedSeen) return;
     reportedSeen = seenCount;
     void deps.send({ type: 'pageSeen', platform: adapter.platform, seen: seenCount });
   }
@@ -163,6 +170,7 @@ export function startContentScript(
 
   scan();
   reportSeen(); // the initial scan's count goes out at once: zero posts is exactly what the popup needs to hear
+  const heartbeat = setInterval(() => reportSeen(true), seenHeartbeatMs);
   const observer = new MutationObserver(() => {
     try {
       scheduleScan();
@@ -184,6 +192,7 @@ export function startContentScript(
       doc.removeEventListener('visibilitychange', onVisibilityChange);
       if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
       if (seenTimer !== undefined) { clearTimeout(seenTimer); seenTimer = undefined; }
+      clearInterval(heartbeat);
     },
     seen: () => seenCount,
   };

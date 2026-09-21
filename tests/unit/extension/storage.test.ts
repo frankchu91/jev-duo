@@ -1,14 +1,17 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { DuoStats } from '../../../src/core/duo';
 import type { Verdict } from '../../../src/core/types';
-import { DEFAULT_SETTINGS } from '../../../src/extension/messages';
+import { DEFAULT_SETTINGS, type PageSeenReport } from '../../../src/extension/messages';
 import {
   loadExamples,
+  loadPageSeen,
   loadSettings,
   loadStats,
   loadVerdicts,
+  MAX_PAGE_REPORTS,
   MAX_VERDICTS,
   saveExamples,
+  savePageSeen,
   saveSettings,
   saveStats,
   saveVerdicts,
@@ -155,6 +158,41 @@ describe('extension storage', () => {
     it('loadVerdicts() returns [] when the stored value itself is not an array', async () => {
       await chrome.storage.session.set({ verdicts: 'totally-not-an-array' });
       expect(await loadVerdicts()).toEqual([]);
+    });
+  });
+
+  // Session, not local: a post count describes a page that is open right now, and the point of
+  // persisting it at all is only to outlive the service worker Chrome evicts after ~30s idle.
+  describe('pageSeen (chrome.storage.session)', () => {
+    const mkReport = (tabId: number, seen = 3): PageSeenReport => ({ tabId, platform: 'x', seen, at: '2026-01-01T00:00:00.000Z' });
+
+    it('loadPageSeen() is [] before anything is saved', async () => {
+      expect(await loadPageSeen()).toEqual([]);
+    });
+
+    it('savePageSeen()/loadPageSeen() round-trip the reports in order', async () => {
+      const reports = [mkReport(1), mkReport(2, 0)];
+      await savePageSeen(reports);
+      expect(await loadPageSeen()).toEqual(reports);
+      expect((await chrome.storage.local.get('pageSeen')).pageSeen).toBeUndefined();
+    });
+
+    it('savePageSeen() caps at MAX_PAGE_REPORTS, keeping the most recent tabs', async () => {
+      await savePageSeen(Array.from({ length: MAX_PAGE_REPORTS + 5 }, (_, i) => mkReport(i)));
+      const loaded = await loadPageSeen();
+      expect(loaded).toHaveLength(MAX_PAGE_REPORTS);
+      expect(loaded[0].tabId).toBe(5);
+    });
+
+    it('loadPageSeen() drops malformed entries and a non-array root, never throwing', async () => {
+      const good = mkReport(7, 0);
+      await chrome.storage.session.set({
+        pageSeen: [good, 'nope', null, { tabId: '7', platform: 'x', seen: 0, at: 'now' }, { tabId: 8 }, { platform: 'x', seen: 1, at: 'now' }],
+      });
+      expect(await loadPageSeen()).toEqual([good]);
+
+      await chrome.storage.session.set({ pageSeen: { not: 'an array' } });
+      expect(await loadPageSeen()).toEqual([]);
     });
   });
 });
