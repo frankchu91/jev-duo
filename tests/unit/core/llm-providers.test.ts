@@ -67,14 +67,32 @@ describe('createAnthropicLlm', () => {
     await expect(llm.completeJson('s', 'u')).rejects.toThrow('empty completion');
   });
 
-  it('(e) maps a 401 authentication error to a ProviderError with status 401', async () => {
+  it('(e) maps a 401 authentication error to a ProviderError with status 401 and retryable: false', async () => {
     const body = { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } };
     const fetchImpl = vi.fn().mockResolvedValue(errRes(body, 401));
     const llm = createAnthropicLlm({ apiKey: 'bad', fetchImpl, maxRetries: 0 });
-    await expect(llm.completeJson('s', 'u')).rejects.toMatchObject({ status: 401 });
+    await expect(llm.completeJson('s', 'u')).rejects.toMatchObject({ status: 401, retryable: false });
   });
 
-  it('(f) maps browser: true to dangerouslyAllowBrowser', () => {
+  // A rejected fetchImpl is what a DNS/socket failure looks like to the SDK. The SDK
+  // normalises it into an `Anthropic.APIConnectionError` (status undefined) before it
+  // reaches our catch block — confirmed with a live probe against the installed SDK.
+  it('(f) treats a connection failure (fetch rejects) as retryable with status undefined', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const llm = createAnthropicLlm({ apiKey: 'k', fetchImpl, maxRetries: 0 });
+    await expect(llm.completeJson('s', 'u')).rejects.toMatchObject({ status: undefined, retryable: true });
+  });
+
+  it('(g) treats any other fetch-layer throw as retryable too (SDK normalises it to APIConnectionError as well)', async () => {
+    // An unrelated error class from inside a custom fetch — the SDK's own probe output shows
+    // it still comes out as `Anthropic.APIConnectionError` (constructor.name "APIConnectionError",
+    // message "Connection error."), same as case (f); asserting on retryable/status either way.
+    const fetchImpl = vi.fn().mockRejectedValue(new RangeError('boom'));
+    const llm = createAnthropicLlm({ apiKey: 'k', fetchImpl, maxRetries: 0 });
+    await expect(llm.completeJson('s', 'u')).rejects.toMatchObject({ status: undefined, retryable: true });
+  });
+
+  it('(h) maps browser: true to dangerouslyAllowBrowser', () => {
     // Node's own `navigator` global is a getter-only own property, so plain assignment
     // throws; vi.stubGlobal patches it (and restores it via unstubAllGlobals) safely.
     vi.stubGlobal('window', { document: {} });
@@ -95,7 +113,7 @@ describe('createAnthropicLlm', () => {
 describe('createOpenRouterLlm', () => {
   const okChat = (content: unknown) => okRes({ choices: [{ message: { content } }] });
 
-  it('(g) posts to the chat completions endpoint with the OpenRouter headers, default model, and returns the content', async () => {
+  it('(i) posts to the chat completions endpoint with the OpenRouter headers, default model, and returns the content', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okChat('hello world'));
     const llm = createOpenRouterLlm({ apiKey: 'or-key', fetchImpl });
     expect(llm.name).toBe('openrouter');
@@ -124,7 +142,7 @@ describe('createOpenRouterLlm', () => {
     expect(result).toBe('hello world');
   });
 
-  it('(h) sends an explicit model override verbatim', async () => {
+  it('(j) sends an explicit model override verbatim', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okChat('hi'));
     const llm = createOpenRouterLlm({ apiKey: 'or-key', model: 'anthropic/claude-opus-5-custom', fetchImpl });
     await llm.completeJson('s', 'u');
@@ -132,7 +150,7 @@ describe('createOpenRouterLlm', () => {
     expect(JSON.parse(init.body as string).model).toBe('anthropic/claude-opus-5-custom');
   });
 
-  it('(i) joins an array-of-parts message content', async () => {
+  it('(k) joins an array-of-parts message content', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       okChat([
         { type: 'text', text: 'foo' },
@@ -144,13 +162,13 @@ describe('createOpenRouterLlm', () => {
     expect(result).toBe('foobar');
   });
 
-  it('(j) rejects with "empty completion" when content is empty', async () => {
+  it('(l) rejects with "empty completion" when content is empty', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(okChat(''));
     const llm = createOpenRouterLlm({ apiKey: 'or-key', fetchImpl });
     await expect(llm.completeJson('s', 'u')).rejects.toThrow('empty completion');
   });
 
-  it('(k) maps a 401 error to a ProviderError with status 401', async () => {
+  it('(m) maps a 401 error to a ProviderError with status 401', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(errRes({ error: { code: 401, message: 'Unauthorized' } }, 401));
     const llm = createOpenRouterLlm({ apiKey: 'bad', fetchImpl });
     await expect(llm.completeJson('s', 'u')).rejects.toMatchObject({ status: 401 });

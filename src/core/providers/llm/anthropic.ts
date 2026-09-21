@@ -45,9 +45,17 @@ export function createAnthropicLlm(opts: AnthropicLlmOptions): LlmProvider {
       } catch (err) {
         if (err instanceof Anthropic.APIError) {
           const status = err.status;
-          throw new ProviderError(err.message, status, status === 429 || (status !== undefined && status >= 500));
+          // Connection/timeout failures (APIConnectionError, and APIConnectionTimeoutError via
+          // inheritance) carry no HTTP status but are exactly the transient class `retryable`
+          // exists for — treat them as retryable regardless of status, like fetchJson does.
+          const retryable =
+            status === 429 || (status !== undefined && status >= 500) || err instanceof Anthropic.APIConnectionError;
+          throw new ProviderError(err.message, status, retryable);
         }
-        throw err;
+        // Not an SDK error at all (should not happen via the fetch layer, which the SDK
+        // normalises into APIConnectionError — see the tests — but kept for defense in depth,
+        // mirroring fetchJson's catch-all in http.ts).
+        throw new ProviderError(err instanceof Error ? err.message : String(err), undefined, true);
       }
 
       if (message.stop_reason === 'refusal') throw new ProviderError('llm refused the request');
