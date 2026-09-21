@@ -40,7 +40,8 @@ export async function run(ctx: RunCtx): Promise<number> {
   if (usedMock) ctx.stderr(NO_KEY_NOTE);
   const providers = resolveProviders({ ...config, fetchImpl: ctx.fetchImpl });
 
-  const agent = new DuoAgent({ jev: providers.jev, llm: providers.llm, pack, settings: { strictness: ctx.flags.strictness } });
+  // Arbiter off unless --arbiter: see the same note in hn.ts.
+  const agent = new DuoAgent({ jev: providers.jev, llm: providers.llm, pack, settings: { strictness: ctx.flags.strictness, arbiter: ctx.flags.arbiter } });
   const verdicts = await agent.judge(items);
 
   const output = ctx.flags.json

@@ -1,10 +1,10 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseCli } from '../../../src/cli/args';
 import { run } from '../../../src/cli/commands/judge';
-import { compile, createMockLlm } from '../../../src/core/index';
+import { compile, createMockLlm, type Verdict } from '../../../src/core/index';
 
 const FIXTURE_INPUT = 'tests/e2e/fixtures/items.jsonl';
 
@@ -58,6 +58,58 @@ describe('judge command', () => {
     const table = out.join('');
     const itemLines = table.trimEnd().split('\n').slice(0, -1); // drop the footer line
     expect(itemLines).toHaveLength(2);
+  });
+
+  // Spec §4.5: the arbiter is off by default on the CLI, where one command judges dozens of posts at
+  // once and every gray-zone escalation is an LLM call the user never asked for.
+  describe('--arbiter', () => {
+    /** A rule the mock fast brain lands squarely inside the ambiguous band on (p ~= 0.46 against the
+     * item below), which is the only case that ever reaches the arbiter. */
+    const GRAY_PACK = {
+      version: 1,
+      intent: 'hide gray',
+      compiledAt: '2026-01-01T00:00:00.000Z',
+      compiledBy: 'mock',
+      rules: [{ id: 'gray', label: 'Gray', question: 'This post is about databases, quantum computing and pasta.', threshold: 0.7, action: 'fold', ambiguous: [0.2, 0.7] }],
+      keeps: [],
+    };
+    const GRAY_ITEM = { id: 'fx:7', platform: 'generic', text: 'A deep dive into how modern databases handle query planning, indexing, and replication in PostgreSQL 17' };
+
+    /** An OpenRouter chat completion whose content is the arbiter's JSON reply. */
+    const arbiterReply = () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"hide":true,"ruleId":"gray","why":"it is about databases"}' }}] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    async function judgeGray(extraArgs: string[], fetchImpl: typeof fetch): Promise<Verdict> {
+      const grayPackPath = join(dir, 'gray-pack.json');
+      const grayItemPath = join(dir, 'gray-item.jsonl');
+      await writeFile(grayPackPath, JSON.stringify(GRAY_PACK), 'utf8');
+      await writeFile(grayItemPath, JSON.stringify(GRAY_ITEM), 'utf8');
+
+      const { flags, positionals } = parseCli(['--pack', grayPackPath, '--input', grayItemPath, '--provider', 'mock', '--llm', 'openrouter', '--json', ...extraArgs]);
+      const { out, stdout, stderr } = captured();
+      const code = await run({ flags, positionals, env: { OPENROUTER_API_KEY: 'or-key' }, stdout, stderr, fetchImpl });
+      expect(code).toBe(0);
+      return JSON.parse(out.join('').trim()) as Verdict;
+    }
+
+    it('by default never calls the slow brain: an ambiguous post just stays visible', async () => {
+      const fetchImpl = vi.fn<typeof fetch>();
+      const verdict = await judgeGray([], fetchImpl);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(verdict.decision).toEqual({ kind: 'keep' });
+      expect(verdict.source).toBe('jev');
+    });
+
+    it('with --arbiter, the same post is escalated and the slow brain\'s answer wins', async () => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(arbiterReply());
+      const verdict = await judgeGray(['--arbiter'], fetchImpl);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(verdict.decision).toMatchObject({ kind: 'fold', ruleId: 'gray' });
+      expect(verdict.source).toBe('arbiter');
+    });
   });
 
   it('exits 1 with a stderr message when --pack is missing', async () => {

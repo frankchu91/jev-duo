@@ -11,6 +11,8 @@ export interface CliFlags {
   llm?: string;
   strictness: number;
   json: boolean;
+  arbiter: boolean;
+  live: boolean;
   withFeedback?: string;
   help: boolean;
   version: boolean;
@@ -30,6 +32,8 @@ export interface RunCtx {
 }
 
 const DEFAULT_LIMIT = 30;
+const LIMIT_MIN = 1;
+const LIMIT_MAX = 100; // the Algolia front-page endpoint's own hitsPerPage ceiling
 
 const OPTIONS = {
   rules: { type: 'string' },
@@ -41,15 +45,24 @@ const OPTIONS = {
   llm: { type: 'string' },
   strictness: { type: 'string' },
   json: { type: 'boolean', default: false },
+  arbiter: { type: 'boolean', default: false },
+  live: { type: 'boolean', default: false },
   'with-feedback': { type: 'string' },
   help: { type: 'boolean', short: 'h', default: false },
   version: { type: 'boolean', short: 'v', default: false },
 } as const;
 
-function toNumber(s: string | undefined, fallback: number): number {
-  if (s === undefined) return fallback;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : fallback;
+/** Rejects a numeric flag rather than silently falling back to the default: `--limit abc` or
+ * `--strictness 5` is a typo the user wants to hear about, and index.ts turns the throw into one
+ * `jev-duo: ... (try --help)` line and exit code 1. */
+function numberFlag(name: string, raw: string | undefined, fallback: number, opts: { min: number; max: number; integer?: boolean }): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  const shape = opts.integer ? 'an integer' : 'a number';
+  if (raw.trim() === '' || !Number.isFinite(n) || (opts.integer && !Number.isInteger(n)) || n < opts.min || n > opts.max) {
+    throw new Error(`--${name} must be ${shape} between ${opts.min} and ${opts.max} (got "${raw}")`);
+  }
+  return n;
 }
 
 /** Thin wrapper over `node:util` `parseArgs`: the first positional is the command, the rest are
@@ -62,11 +75,13 @@ export function parseCli(argv: string[]): { command: string | undefined; flags: 
     pack: values.pack,
     out: values.out,
     input: values.input,
-    limit: toNumber(values.limit, DEFAULT_LIMIT),
+    limit: numberFlag('limit', values.limit, DEFAULT_LIMIT, { min: LIMIT_MIN, max: LIMIT_MAX, integer: true }),
     provider: values.provider,
     llm: values.llm,
-    strictness: toNumber(values.strictness, DEFAULT_STRICTNESS),
+    strictness: numberFlag('strictness', values.strictness, DEFAULT_STRICTNESS, { min: 0, max: 1 }),
     json: values.json ?? false,
+    arbiter: values.arbiter ?? false,
+    live: values.live ?? false,
     withFeedback: values['with-feedback'],
     help: values.help ?? false,
     version: values.version ?? false,

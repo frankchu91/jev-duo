@@ -18,7 +18,9 @@ export async function run(ctx: RunCtx): Promise<number> {
   if (usedMock) ctx.stderr(NO_KEY_NOTE);
   const providers = resolveProviders({ ...config, fetchImpl: ctx.fetchImpl });
 
-  const agent = new DuoAgent({ jev: providers.jev, llm: providers.llm, settings: { strictness: ctx.flags.strictness } });
+  // The arbiter is opt-in on the CLI (spec §4.5): a terminal run is a batch of dozens of posts at
+  // once, where silently spending LLM calls on the gray zone is a surprise, not a service.
+  const agent = new DuoAgent({ jev: providers.jev, llm: providers.llm, settings: { strictness: ctx.flags.strictness, arbiter: ctx.flags.arbiter } });
 
   if (ctx.flags.pack) {
     try {

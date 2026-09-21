@@ -96,6 +96,19 @@ describe('renderTable', () => {
     expect(line.endsWith('x'.repeat(81))).toBe(false);
   });
 
+  // An HN story with a body arrives as "title\n\nbody", and a raw slice of that put the body on its
+  // own lines, splitting one item across several rows of a table that is one line per item.
+  it('collapses whitespace so an item whose text has newlines still renders on one line', () => {
+    const items = [item('i', 'Show HN: my thing\n\nSorry for the   long   post, here is why')];
+    const verdicts: Verdict[] = [
+      { itemId: 'i', rules: [], keeps: [], source: 'jev', latencyMs: 5, decision: { kind: 'keep' } },
+    ];
+    const rendered = renderTable(items, verdicts);
+    const lines = rendered.split('\n');
+    expect(lines).toHaveLength(2); // the item plus the stats footer, nothing in between
+    expect(lines[0]).toBe(`${'1'.padStart(2)} ✓ ${''.padEnd(14)} Show HN: my thing Sorry for the long post, here is why`);
+  });
+
   it('numbers multiple items by rank in input order', () => {
     const items = [item('a', 'first'), item('b', 'second'), item('c', 'third')];
     const verdicts: Verdict[] = items.map((it): Verdict => ({ itemId: it.id, rules: [], keeps: [], source: 'jev', latencyMs: 1, decision: { kind: 'keep' } }));

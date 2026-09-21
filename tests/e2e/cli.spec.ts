@@ -106,6 +106,27 @@ test('an unknown command exits 1 with usage', async () => {
   expect(res.stderr).toContain('Usage:');
 });
 
+// The showcase command: the whole loop (compile an intent, judge a feed, print the table) with no
+// keys AND no network, so it is the same eight verdicts on every machine.
+test('demo judges the bundled sample feed with no keys and no network', async () => {
+  const res = await cli(['demo'], { OPENROUTER_API_KEY: '', TYPESAFE_API_KEY: '', ANTHROPIC_API_KEY: '' });
+  expect(res.code, res.stderr).toBe(0);
+
+  const out = lines(res.stdout);
+  expect(out[0]).toBe('jev-duo demo — mock providers, bundled sample feed');
+  expect(out).toHaveLength(10); // header + 8 posts + stats footer
+  expect(out.filter((l) => l.includes('⚡'))).toHaveLength(4); // crypto x2, political outrage, layoffs
+  expect(out.filter((l) => l.includes('◐'))).toHaveLength(1); // the product launch, dimmed
+  expect(out[9]).toBe('judged 8 · folded 4 · dimmed 1 · kept 3 · errors 0 · p50 0ms · ~$0.0000');
+});
+
+test('an invalid --limit exits 1 with a usage error instead of silently using the default', async () => {
+  const res = await cli(['hn', '--rules', 'hide crypto', '--limit', '0', ...MOCK]);
+  expect(res.code).toBe(1);
+  expect(res.stderr).toContain('--limit must be an integer between 1 and 100');
+  expect(res.stdout).toBe('');
+});
+
 test.describe('network', () => {
   let online = false;
 
@@ -116,10 +137,10 @@ test.describe('network', () => {
     }).then((r) => r.ok, () => false);
   });
 
-  test('demo judges the live Hacker News front page with no keys', async () => {
+  test('demo --live judges the live Hacker News front page with no keys', async () => {
     test.skip(!online, 'hn.algolia.com unreachable (or CI without LIVE=1)');
 
-    const res = await cli(['demo'], { OPENROUTER_API_KEY: '', TYPESAFE_API_KEY: '', ANTHROPIC_API_KEY: '' });
+    const res = await cli(['demo', '--live'], { OPENROUTER_API_KEY: '', TYPESAFE_API_KEY: '', ANTHROPIC_API_KEY: '' });
     expect(res.code, res.stderr).toBe(0);
 
     const out = lines(res.stdout);

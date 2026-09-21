@@ -70,7 +70,9 @@ export function renderTable(items: Item[], verdicts: Verdict[], opts: { color?: 
     const rank = String(i + 1).padStart(RANK_WIDTH, ' ');
     const glyph = glyphFor(v);
     const label = labelFor(v).padEnd(LABEL_WIDTH, ' ');
-    const title = item.text.slice(0, TITLE_MAX_CHARS);
+    // Collapse first, THEN slice: an item whose text carries newlines (an HN story with a body, a
+    // multi-paragraph post) would otherwise break the one-line-per-item table apart.
+    const title = item.text.replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX_CHARS);
     const line = `${rank} ${glyph} ${label} ${title}`;
     return opts.color && v.decision.kind === 'fold' ? `${DIM_ON}${line}${DIM_OFF}` : line;
   });

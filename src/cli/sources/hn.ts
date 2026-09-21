@@ -24,9 +24,12 @@ function stripHtml(html: string): string {
 }
 
 function toItem(hit: HnHit): Item {
+  // Algolia hands back titles with newlines and runs of spaces in them ("Show HN:\n\nSorry, ..."),
+  // which the CLI table prints one per line; the title is a single line by definition, so make it one.
+  const title = hit.title.replace(/\s+/g, ' ').trim();
   const text = hit.story_text
-    ? `${hit.title}\n\n${stripHtml(hit.story_text).slice(0, STORY_TEXT_MAX_CHARS)}`
-    : hit.title;
+    ? `${title}\n\n${stripHtml(hit.story_text).slice(0, STORY_TEXT_MAX_CHARS)}`
+    : title;
   return {
     id: `hn:${hit.objectID}`,
     platform: 'hn',

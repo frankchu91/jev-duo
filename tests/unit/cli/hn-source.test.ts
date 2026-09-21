@@ -61,6 +61,23 @@ describe('fetchHnFrontPage', () => {
     expect(String(url)).toBe('https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=15');
   });
 
+  // Real Algolia titles do carry newlines and runs of spaces; a title is one line by definition, and
+  // the CLI table prints one line per item.
+  it('collapses whitespace inside the title, before any story text is appended', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        hits: [
+          { objectID: '333', title: 'Show HN: my thing\n\nSorry   for the long title', story_text: '<p>body</p>' },
+          { objectID: '444', title: '  Ask HN:\twhat now?  ' },
+        ],
+      }),
+    );
+
+    const items = await fetchHnFrontPage(2, fetchImpl);
+    expect(items[0].text).toBe('Show HN: my thing Sorry for the long title\n\nbody'); // title flattened, body untouched
+    expect(items[1].text).toBe('Ask HN: what now?');
+  });
+
   it('returns an empty array when there are no hits', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ hits: [] }));
     expect(await fetchHnFrontPage(30, fetchImpl)).toEqual([]);

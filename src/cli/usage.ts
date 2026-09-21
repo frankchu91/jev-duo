@@ -13,15 +13,16 @@ Commands:
   hn        Judge the Hacker News front page with your rules
   compile   Turn a plain-English intent into a question pack
   judge     Judge JSONL items (file or stdin) against a pack
-  demo      Run "hn" with mock providers and a built-in intent (no keys)
+  demo      Judge a bundled sample feed with mock providers (no keys, no network)
 
 jev-duo hn [options]
   --pack <file>          Question pack JSON to judge with
   --rules <intent>       Plain-English intent to compile into a pack (alternative to --pack)
-  --limit <n>            Number of front-page posts to fetch (default 30)
+  --limit <n>            Number of front-page posts to fetch, 1-100 (default 30)
   --provider <mode>      Jev provider: mock | openrouter | typesafe
   --llm <mode>           LLM provider: mock | openrouter | anthropic
   --strictness <0..1>    Decision threshold strictness (default 0.5)
+  --arbiter              Ask the slow brain about gray-zone posts (off by default)
   --json                 Print one JSON verdict per line instead of a table
 
 jev-duo compile "<intent>" [options]
@@ -37,11 +38,14 @@ jev-duo judge --pack <file> [options]
   --provider <mode>      Jev provider: mock | openrouter | typesafe
   --llm <mode>           LLM provider: mock | openrouter | anthropic
   --strictness <0..1>    Decision threshold strictness (default 0.5)
+  --arbiter              Ask the slow brain about gray-zone posts (off by default)
   --json                 Print one JSON verdict per line instead of a table
 
-jev-duo demo
-  Judges the live Hacker News front page with mock providers and a built-in
-  demo intent. Requires no API keys.
+jev-duo demo [options]
+  Compiles a built-in demo intent and judges a bundled 8-post sample feed with
+  mock providers: no API keys, no network.
+  --live                 Judge the live Hacker News front page instead
+  --limit <n>            With --live: how many front-page posts to fetch
 
 Options:
   -h, --help      Show this help
