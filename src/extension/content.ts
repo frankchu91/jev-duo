@@ -12,6 +12,11 @@ import { applyPending, clearPending, mountDecision } from './ui/fold';
 
 const DEBOUNCE_MS = 150;
 const MAX_BATCH = 10;
+/** How many times a post may extract to `null` before content.ts gives up on it and marks it seen
+ * anyway. Without a cap, a post that will never be judgeable (e.g. a pure-media tweet with no
+ * tweetText) gets re-extracted on every single MutationObserver scan for as long as it stays in the
+ * DOM — unbounded, since findPosts() is idempotent and keeps returning it every time. */
+const MAX_EXTRACT_ATTEMPTS = 5;
 
 interface Pending { el: Element; targets: Element[]; item: Item }
 
@@ -28,6 +33,7 @@ export function startContentScript(
   const maxBatch = deps.maxBatch ?? MAX_BATCH;
 
   const seen = new Set<Element>();
+  const nullAttempts = new WeakMap<Element, number>();
   const pendingById = new Map<string, Pending>();
   let batch: string[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -92,7 +98,14 @@ export function startContentScript(
       if (seen.has(el)) continue;
       try {
         const item = adapter.extract(el);
-        if (!item) continue; // not judgeable yet: don't mark seen, so a later scan can retry it
+        if (!item) {
+          // Not judgeable yet: retry on later scans (text may still be rendering) up to the cap, then
+          // give up for good — mark it seen so it stops costing a findPosts+extract pass forever.
+          const attempts = (nullAttempts.get(el) ?? 0) + 1;
+          if (attempts >= MAX_EXTRACT_ATTEMPTS) seen.add(el);
+          else nullAttempts.set(el, attempts);
+          continue;
+        }
         seen.add(el);
         queue(el, adapter.targets(el), item);
       } catch {
@@ -136,17 +149,27 @@ export function startContentScript(
   };
 }
 
-/** Real auto-start, skipped entirely under test (no `document`/`chrome`). Checked once at load: a
- * disabled site is a full no-op, never even reaching `startContentScript`. */
-async function boot(): Promise<void> {
-  const adapter = pickAdapter(new URL(location.href));
+interface BootDeps {
+  doc: Document;
+  loc: Location;
+  send: typeof send;
+  start: typeof startContentScript;
+}
+
+/** Real auto-start's decision logic, factored out so it can be driven by a fake `send` and a spy
+ * `start` in tests instead of the real `chrome.runtime`/DOM globals. Checked once at load: a disabled
+ * site (or an unreadable one, `getState` failing) is a full no-op, never even reaching `start`. */
+export async function boot(deps: BootDeps): Promise<void> {
+  const adapter = pickAdapter(new URL(deps.loc.href));
   if (!adapter) return;
-  const state = await send({ type: 'getState' });
+  const state = await deps.send({ type: 'getState' });
   if (!state.ok || state.type !== 'getState') return; // can't confirm enabled: stay out of the way
   if (state.settings.enabledSites[adapter.platform] === false) return;
-  startContentScript(document, location, { send });
+  deps.start(deps.doc, deps.loc, { send: deps.send });
 }
 
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
-  void boot().catch((err: unknown) => console.error('jev-duo content script: boot failed', err));
+  void boot({ doc: document, loc: location, send, start: startContentScript }).catch((err: unknown) =>
+    console.error('jev-duo content script: boot failed', err),
+  );
 }

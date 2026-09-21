@@ -2,9 +2,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { xAdapter } from '../../../src/extension/adapters/x';
 import type { Item, Verdict } from '../../../src/core/types';
-import { startContentScript } from '../../../src/extension/content';
+import { boot, startContentScript } from '../../../src/extension/content';
 import type { Request, Response, send } from '../../../src/extension/messages';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -39,16 +40,24 @@ function makeFakeSend(onCall?: (req: Request) => void) {
 // `send` is generic (`<R extends Request>(req: R) => Promise<Extract<Response, {type: R['type']}> | ...>`);
 // a `vi.fn` mock's concrete `(req: Request) => Promise<Response>` signature is not structurally
 // assignable to that (even though it behaves identically at runtime), so this one cast — applied at the
-// single point every test hands its fake to `startContentScript` — stands in for the real `send`.
-function start(doc: Document, loc: Location, sendFake: (req: Request) => Promise<Response>, opts: { debounceMs?: number; maxBatch?: number } = {}) {
-  return startContentScript(doc, loc, { send: sendFake as unknown as typeof send, ...opts });
+// single point every test hands its fake to startContentScript/boot — stands in for the real `send`.
+function asSend(fn: (req: Request) => Promise<Response>): typeof send {
+  return fn as unknown as typeof send;
 }
+
+function runContentScript(doc: Document, loc: Location, sendFake: (req: Request) => Promise<Response>, opts: { debounceMs?: number; maxBatch?: number } = {}) {
+  return startContentScript(doc, loc, { send: asSend(sendFake), ...opts });
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('startContentScript', () => {
   it('is a no-op when the URL matches no adapter (never calls send)', () => {
     const { doc } = loadDoc('x.html');
     const send = makeFakeSend();
-    const script = start(doc, { href: 'https://example.com/' } as Location, send);
+    const script = runContentScript(doc, { href: 'https://example.com/' } as Location, send);
     expect(script.seen()).toBe(0);
     script.stop();
     expect(send).not.toHaveBeenCalled();
@@ -58,7 +67,7 @@ describe('startContentScript', () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
     const calls: Request[] = [];
     const send = makeFakeSend((req) => calls.push(req));
-    const script = start(doc, loc, send);
+    const script = runContentScript(doc, loc, send);
 
     expect(script.seen()).toBe(6);
     await new Promise((r) => setTimeout(r, 200));
@@ -72,10 +81,36 @@ describe('startContentScript', () => {
     script.stop();
   });
 
-  it('judges a later-appended post after the mutation observer fires', async () => {
+  it('force-flushes at maxBatch (10): the first judge request carries exactly 10 items, a second carries the rest', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
-    const send = makeFakeSend();
-    const script = start(doc, loc, send);
+    const template = doc.querySelector('article[data-testid="tweet"]')!;
+    const primaryColumn = doc.querySelector('[data-testid="primaryColumn"]')!;
+    // 6 fixture tweets + 5 clones (unique status ids) = 11 posts total.
+    for (let i = 0; i < 5; i++) {
+      const clone = template.cloneNode(true) as Element;
+      clone.querySelector('a[href*="/status/"]')!.setAttribute('href', `/clone${i}/status/900000000000000${i}`);
+      primaryColumn.appendChild(clone);
+    }
+
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send);
+
+    expect(script.seen()).toBe(11);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const judgeCalls = calls.filter((c) => c.type === 'judge');
+    expect(judgeCalls).toHaveLength(2);
+    if (judgeCalls[0].type === 'judge') expect(judgeCalls[0].items).toHaveLength(10);
+    if (judgeCalls[1].type === 'judge') expect(judgeCalls[1].items).toHaveLength(1);
+    script.stop();
+  });
+
+  it('judges a later-appended post after the mutation observer fires, in its own judge request, and mounts its decision', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send);
     await new Promise((r) => setTimeout(r, 200));
     expect(script.seen()).toBe(6);
 
@@ -90,13 +125,54 @@ describe('startContentScript', () => {
 
     await new Promise((r) => setTimeout(r, 200));
     expect(script.seen()).toBe(7);
+
+    const judgeCalls = calls.filter((c) => c.type === 'judge');
+    expect(judgeCalls).toHaveLength(2);
+    if (judgeCalls[1].type === 'judge') {
+      expect(judgeCalls[1].items).toHaveLength(1);
+      expect(judgeCalls[1].items[0].id).toBe('x:1700000000000000007');
+    }
+    // The appended tweet isn't in FOLD_IDS, so fixtureVerdict gives it a plain keep, which mounts a
+    // hover-only hide-this button directly on the post element — proof a decision actually landed.
+    expect(article.querySelector('.jd-hide')).toBeTruthy();
+    script.stop();
+  });
+
+  it('caps re-extraction of a permanently null post at MAX_EXTRACT_ATTEMPTS (5) and never sends it for judging', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const broken = doc.createElement('article');
+    broken.setAttribute('data-testid', 'tweet');
+    broken.innerHTML = '<div data-testid="tweetPhoto"></div>'; // no tweetText: extract() always returns null
+    doc.querySelector('[data-testid="primaryColumn"]')!.appendChild(broken);
+
+    const extractSpy = vi.spyOn(xAdapter, 'extract');
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send);
+
+    await new Promise((r) => setTimeout(r, 200)); // initial scan (attempt 1) + its debounce/flush
+
+    // Six more mutation-triggered scans (attempts 2-5, then two that must be skipped by the cap).
+    for (let i = 0; i < 6; i++) {
+      doc.body.appendChild(doc.createComment(`scan-trigger-${i}`));
+      await new Promise((r) => setTimeout(r, 40));
+    }
+
+    const brokenAttempts = extractSpy.mock.calls.filter(([el]) => el === broken).length;
+    expect(brokenAttempts).toBe(5);
+    expect(script.seen()).toBe(7); // 6 real tweets + the broken one, given up on and marked seen
+
+    const judgeCalls = calls.filter((c) => c.type === 'judge');
+    expect(judgeCalls).toHaveLength(1); // only the initial batch of 6 real tweets; broken never queued
+    if (judgeCalls[0].type === 'judge') expect(judgeCalls[0].items).toHaveLength(6);
+
     script.stop();
   });
 
   it('on ok:false clears pending and leaves posts visible without mounting anything', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
     const send = vi.fn(async (): Promise<Response> => ({ ok: false, error: 'boom' }));
-    const script = start(doc, loc, send);
+    const script = runContentScript(doc, loc, send);
     await new Promise((r) => setTimeout(r, 200));
 
     expect(doc.querySelectorAll('[data-jd="pending"]')).toHaveLength(0);
@@ -108,7 +184,7 @@ describe('startContentScript', () => {
   it('stop() disconnects the observer: later mutations are no longer judged', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
     const send = makeFakeSend();
-    const script = start(doc, loc, send);
+    const script = runContentScript(doc, loc, send);
     await new Promise((r) => setTimeout(r, 200));
     script.stop();
 
@@ -133,7 +209,7 @@ describe('startContentScript', () => {
       return original(sel);
     }) as typeof doc.querySelectorAll;
 
-    const script = start(doc, loc, send);
+    const script = runContentScript(doc, loc, send);
     expect(script.seen()).toBe(0); // first scan threw and was swallowed; nothing marked seen
     script.stop();
   });
@@ -142,7 +218,7 @@ describe('startContentScript', () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
     const calls: Request[] = [];
     const send = makeFakeSend((req) => calls.push(req));
-    const script = start(doc, loc, send);
+    const script = runContentScript(doc, loc, send);
     await new Promise((r) => setTimeout(r, 200));
 
     const wrongBtn = doc.querySelector<HTMLButtonElement>('.jd-wrong')!;
@@ -162,7 +238,7 @@ describe('startContentScript', () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
     const calls: Request[] = [];
     const send = makeFakeSend((req) => calls.push(req));
-    const script = start(doc, loc, send);
+    const script = runContentScript(doc, loc, send);
     await new Promise((r) => setTimeout(r, 200));
 
     const hideBtn = doc.querySelector<HTMLButtonElement>('.jd-hide');
@@ -173,5 +249,57 @@ describe('startContentScript', () => {
     expect(feedback).toBeTruthy();
     if (feedback?.type === 'feedback') expect(feedback.example.expected).toBe('hide');
     script.stop();
+  });
+});
+
+describe('boot', () => {
+  function makeGetStateSend(enabledSites: Record<'x' | 'reddit' | 'hn', boolean> | null) {
+    return vi.fn(async (req: Request): Promise<Response> => {
+      if (req.type !== 'getState') return { ok: false, error: 'unexpected request in boot test' };
+      if (enabledSites === null) return { ok: false, error: 'boom' };
+      return {
+        ok: true,
+        type: 'getState',
+        settings: { providerMode: 'mock', keys: {}, intent: '', strictness: 0.5, arbiter: true, enabledSites },
+        stats: { judged: 0, folded: 0, dimmed: 0, badged: 0, kept: 0, keptByRule: 0, errors: 0, cacheHits: 0, arbitrated: 0, p50LatencyMs: 0, estimatedUsd: 0, inputTokens: 0, lastSources: [] },
+        exampleCount: 0,
+        hasKeys: false,
+        providers: { jev: 'mock', llm: 'mock' },
+      };
+    });
+  }
+
+  it('does not call start when getState reports the platform disabled', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const send = makeGetStateSend({ x: false, reddit: true, hn: true });
+    const start = vi.fn();
+    await boot({ doc, loc, send: asSend(send), start });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('does not call start when getState fails (fail open by staying inert)', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const send = makeGetStateSend(null);
+    const start = vi.fn();
+    await boot({ doc, loc, send: asSend(send), start });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('calls start exactly once, with the page, when the platform is enabled', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const send = makeGetStateSend({ x: true, reddit: true, hn: true });
+    const start = vi.fn();
+    await boot({ doc, loc, send: asSend(send), start });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(doc, loc, { send: asSend(send) });
+  });
+
+  it('is a no-op (never calls getState or start) when the URL matches no adapter', async () => {
+    const { doc } = loadDoc('x.html');
+    const send = makeGetStateSend({ x: true, reddit: true, hn: true });
+    const start = vi.fn();
+    await boot({ doc, loc: { href: 'https://example.com/' } as Location, send: asSend(send), start });
+    expect(send).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
   });
 });

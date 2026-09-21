@@ -56,6 +56,24 @@ describe('xAdapter', () => {
     expect(item?.meta?.hasMedia).toBe(true);
   });
 
+  it('detects a reply via a div[dir] whose own text starts with "Replying to "', () => {
+    const el = loadDoc('x.html').createElement('article');
+    el.setAttribute('data-testid', 'tweet');
+    el.innerHTML = [
+      '<div dir="ltr">Replying to <a href="/someone">@someone</a></div>',
+      '<div data-testid="User-Name"><span>Name</span><span tabindex="-1">@replier</span></div>',
+      '<a href="/replier/status/1700000000000000123"><time datetime="2026-09-21T02:00:00Z">2h</time></a>',
+      '<div data-testid="tweetText">Totally agree with this take.</div>',
+    ].join('');
+    const item = xAdapter.extract(el);
+    expect(item?.meta?.isReply).toBe(true);
+  });
+
+  it('does not flag isReply when there is no "Replying to " div', () => {
+    const item = xAdapter.extract(xAdapter.findPosts(doc)[3]);
+    expect(item?.meta?.isReply).toBe(false);
+  });
+
   it('appends the nested quoted tweet text on the 6th tweet without counting it as a separate post', () => {
     const item = xAdapter.extract(xAdapter.findPosts(doc)[5]);
     expect(item?.text).toContain('Solid point about incremental refactors');
@@ -111,6 +129,17 @@ describe('redditAdapter', () => {
     const item = redditAdapter.extract(redditAdapter.findPosts(doc)[2]);
     expect(item?.text).toBe('Rust 1.90 released with new borrow checker improvements');
     expect(item?.meta?.hasLink).toBe(true);
+  });
+
+  it('detects hasMedia for an image post-type', () => {
+    const el = loadDoc('reddit.html').createElement('shreddit-post');
+    el.setAttribute('id', 't3_img1');
+    el.setAttribute('post-title', 'Cool screenshot from the conference');
+    el.setAttribute('post-type', 'image');
+    el.setAttribute('author', 'photo_poster');
+    const item = redditAdapter.extract(el);
+    expect(item?.meta?.hasMedia).toBe(true);
+    expect(item?.meta?.hasLink).toBe(false);
   });
 
   it('targets() returns just the shreddit-post itself', () => {
