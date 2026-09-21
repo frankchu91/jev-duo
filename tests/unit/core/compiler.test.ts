@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { compile } from '../../../src/core/compiler';
+import { MAX_PROMPT_EXAMPLES } from '../../../src/core/constants';
 import { ARBITER_SYSTEM, COMPILE_SYSTEM, arbiterUser, compileUser } from '../../../src/core/prompts';
 import { createMockLlm } from '../../../src/core/providers/llm/mock';
 import { ProviderError, type LlmProvider } from '../../../src/core/providers/types';
@@ -132,6 +133,40 @@ describe('compileUser', () => {
     expect(prompt).toContain('"expected":"hide"');
     expect(prompt).toContain('"whatFired":"nothing"');
   });
+
+  /** Builds `count` examples with distinguishable text "ex-1" .. "ex-<count>", oldest -> newest, matching the order ExampleStore.list() returns. */
+  function mkNumberedExamples(count: number): Example[] {
+    return Array.from({ length: count }, (_, i) => ({
+      item: { id: `x:${i + 1}`, platform: 'x', text: `ex-${i + 1}` },
+      expected: 'hide',
+      actualDecision: { kind: 'keep' },
+      source: 'user',
+      at: '2026-09-19T00:00:00.000Z',
+    }));
+  }
+
+  /** Extracts just the JSON lines between the <examples> tags, matching compileUser's own wrapping. */
+  function examplesLines(prompt: string): string[] {
+    const start = prompt.indexOf('<examples>\n') + '<examples>\n'.length;
+    const end = prompt.indexOf('\n</examples>');
+    return prompt.slice(start, end).split('\n');
+  }
+
+  it('caps the <examples> block at the 40 most recent examples, dropping the oldest first', () => {
+    const prompt = compileUser('hide spam', mkNumberedExamples(45));
+    expect(examplesLines(prompt)).toHaveLength(MAX_PROMPT_EXAMPLES);
+    expect(prompt).toContain('"text":"ex-45"');
+    expect(prompt).toContain('"text":"ex-6"');
+    expect(prompt).not.toContain('"text":"ex-5"');
+  });
+
+  it('includes every example when there are fewer than the cap (unchanged behaviour)', () => {
+    const prompt = compileUser('hide spam', mkNumberedExamples(3));
+    expect(examplesLines(prompt)).toHaveLength(3);
+    expect(prompt).toContain('"text":"ex-1"');
+    expect(prompt).toContain('"text":"ex-2"');
+    expect(prompt).toContain('"text":"ex-3"');
+  });
 });
 
 describe('arbiterUser', () => {
@@ -172,5 +207,10 @@ describe('prompt constants', () => {
     expect(COMPILE_SYSTEM).toContain('two-brain feed filter');
     expect(ARBITER_SYSTEM).toContain('Output ONLY JSON');
     expect(ARBITER_SYSTEM).toContain('two-brain feed filter');
+  });
+
+  it('are exactly the byte lengths verified against the spec (catches a silent partial edit)', () => {
+    expect(COMPILE_SYSTEM).toHaveLength(1956);
+    expect(ARBITER_SYSTEM).toHaveLength(300);
   });
 });

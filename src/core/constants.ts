@@ -15,3 +15,4 @@ export const STRICTNESS_MIN_THRESHOLD = 0.5;
 export const STRICTNESS_MAX_THRESHOLD = 0.95;
 export const DEFAULT_STRICTNESS = 0.5; // neutral slider position, no offset
 export const JEV_INPUT_USD_PER_MTOK = 0.042;
+export const MAX_PROMPT_EXAMPLES = 40;

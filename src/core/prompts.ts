@@ -1,3 +1,4 @@
+import { MAX_PROMPT_EXAMPLES } from './constants';
 import type { Example, Item, QuestionPack, Verdict } from './types';
 
 // Verbatim system prompt for System 2 (the compiler). Extracted programmatically from the
@@ -5,12 +6,13 @@ import type { Example, Item, QuestionPack, Verdict } from './types';
 export const COMPILE_SYSTEM =
   "You are the deliberate half of a two-brain feed filter. A user describes, in plain English, what they do not want to see in their social feed and what they always want to keep. You turn that into a small set of independent, typed questions that a fast decision model (Jev) will answer for every post using ONLY the post text and a few flags (platform, author, hasLink, hasMedia, isReply, isPromoted).\n\nRules for writing questions:\n1. Each rule is ONE statement about \"this post\" that can be judged true or false from the post alone. Never combine two ideas with \"or\"/\"and\"; split them.\n2. Statements must be concrete and observable (\"This post is primarily promoting a cryptocurrency or token to buy\") — not vague (\"This post is bad\").\n3. Do not mention the user, the feed, or the filter. No reasoning words like \"probably\".\n4. ids are lowercase slugs (a-z, 0-9, -), unique, max 40 chars. labels are 1-3 words, max 24 chars, shown on a badge.\n5. threshold: default 0.7 for hide rules and 0.6 for keeps. Use 0.6 for hide rules the user phrased as absolute (\"never\", \"no ... at all\"); use 0.8 for rules phrased softly (\"less\", \"fewer\", \"not so much\").\n6. action: \"fold\" (collapse) by default; \"dim\" if the user said dim/fade/de-emphasize; \"badge\" if the user only wants a label/tag/flag.\n7. Keeps are exceptions: a post matching a keep is always shown even if a hide rule matches. Only create keeps the user asked for.\n8. If examples are provided, they are posts the user corrected. Reword the smallest number of statements needed so every example would be judged as the user expects. Preserve rule ids whose meaning is unchanged. Do not add rules the user did not ask for.\n\nOutput: ONLY a JSON object, no prose, no code fences:\n{\"rules\":[{\"id\":\"...\",\"label\":\"...\",\"question\":\"...\",\"threshold\":0.7,\"action\":\"fold\"}],\"keeps\":[{\"id\":\"...\",\"label\":\"...\",\"question\":\"...\",\"threshold\":0.6}],\"notes\":\"one short paragraph explaining how you interpreted the intent\"}";
 
-/** Builds the compile-time user message: the intent wrapped in <intent> tags, plus a JSON-lines <examples> block when corrections are available. */
+/** Builds the compile-time user message: the intent wrapped in <intent> tags, plus a JSON-lines <examples> block when corrections are available. `examples` is expected oldest -> newest (as `ExampleStore.list()` returns it), so the cap keeps the most recent `MAX_PROMPT_EXAMPLES`. */
 export function compileUser(intent: string, examples: Example[]): string {
+  const recent = examples.slice(-MAX_PROMPT_EXAMPLES);
   const examplesBlock =
-    examples.length > 0
+    recent.length > 0
       ? '\n<examples>\n' +
-        examples
+        recent
           .map((e) => {
             const decision = e.actualDecision;
             const whatFired = decision.kind === 'keep' ? 'nothing' : (decision.ruleId ?? 'unknown');
