@@ -4,6 +4,15 @@ on:
   push:
   pull_request:
 
+# Nothing here writes to the repo: the job only checks out, installs and tests.
+permissions:
+  contents: read
+
+# A push that lands while the previous one is still running supersedes it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     runs-on: ubuntu-latest

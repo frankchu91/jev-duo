@@ -39,7 +39,10 @@ await chmod(cliOut, 0o755);
 outputs.push(rel(cliOut));
 
 // (b) Extension scripts. The service worker is declared `type: module` in the
-// manifest, so it may stay ESM; content script and popup must be IIFEs.
+// manifest, so it may stay ESM; content script and popup must be IIFEs. These
+// are minified (the CLI is not: it stays readable for `node dist/cli/index.js`
+// stack traces) because the service worker bundle carries the Anthropic SDK and
+// Chrome parses the whole thing on every wake-up.
 const extEntries = [
   { entry: 'background.ts', out: 'background.js', format: 'esm' },
   { entry: 'content.ts', out: 'content.js', format: 'iife' },
@@ -54,6 +57,7 @@ for (const { entry, out, format } of extEntries) {
     platform: 'browser',
     format,
     target: 'chrome120',
+    minify: true,
     logLevel: 'warning',
   });
   outputs.push(rel(outfile));

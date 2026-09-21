@@ -99,8 +99,15 @@ export async function launchWithExtension(): Promise<LaunchedExtension> {
   let started: { context: BrowserContext; sw: Worker };
   try {
     started = await attempt(true);
-  } catch {
-    headless = false; // headless extension loading is occasionally flaky; one headed retry
+  } catch (headlessErr) {
+    // Headless extension loading is occasionally flaky locally, so one headed retry is worth it
+    // there. On CI there is no display to be headed on: the retry can only fail slowly (or hang),
+    // so the headless failure is reported as-is instead.
+    if (process.env.CI) {
+      await cleanupTemp();
+      throw headlessErr;
+    }
+    headless = false;
     try {
       started = await attempt(false);
     } catch (err) {
