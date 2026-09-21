@@ -15,3 +15,6 @@ export * from './providers/llm/mock';
 export * from './providers/llm/anthropic';
 export * from './providers/llm/openrouter';
 export * from './providers/resolve';
+export * from './prompts';
+export * from './compiler';
+export * from './learner';
