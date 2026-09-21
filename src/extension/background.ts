@@ -260,6 +260,9 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
 // throws — the module itself must be safe to load before anyone has wired up messaging.
 if (typeof chrome !== 'undefined') {
   const background = createBackground();
+  // Test hook: chrome.runtime.sendMessage never delivers to the sender's own context, so the e2e
+  // suite drives the background through this handle instead (tests/e2e/helpers.ts).
+  (globalThis as unknown as { __jevDuo?: typeof background }).__jevDuo = background;
   chrome.runtime.onMessage.addListener((req: Request, _sender, sendResponse) => {
     background
       .handle(req)
