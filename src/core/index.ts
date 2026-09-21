@@ -12,3 +12,6 @@ export * from './providers/jev/mock';
 export * from './providers/jev/typesafe';
 export * from './providers/jev/openrouter';
 export * from './providers/llm/mock';
+export * from './providers/llm/anthropic';
+export * from './providers/llm/openrouter';
+export * from './providers/resolve';
