@@ -1,0 +1,17 @@
+export const DEFAULT_HIDE_THRESHOLD = 0.7;
+export const DEFAULT_KEEP_THRESHOLD = 0.6;
+export const DEFAULT_AMBIGUOUS_LOW = 0.45;
+export const LABEL_MAX_CHARS = 24;
+export const MAX_TEXT_CHARS = 2000;
+export const CACHE_SIZE = 5000;
+export const CONCURRENCY = 6;
+export const TIMEOUT_MS = 10_000;
+export const RETRIES = 2;
+export const ARBITER_BUDGET_CALLS = 20;
+export const ARBITER_BUDGET_WINDOW_MS = 600_000;
+export const EXAMPLES_MAX = 200;
+export const AUTO_RECOMPILE_EVERY = 10;
+export const STRICTNESS_MIN_THRESHOLD = 0.5;
+export const STRICTNESS_MAX_THRESHOLD = 0.95;
+export const DEFAULT_STRICTNESS = 0.5; // neutral slider position, no offset
+export const JEV_INPUT_USD_PER_MTOK = 0.042;
