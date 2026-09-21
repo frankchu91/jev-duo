@@ -61,7 +61,7 @@ for (const { entry, out, format } of extEntries) {
 
 // (c) Static assets, flattened into dist/extension/ (icons keep their folder,
 // matching the paths declared in manifest.json).
-for (const file of ['manifest.json', path.join('popup', 'popup.html'), 'styles.css']) {
+for (const file of ['manifest.json', path.join('popup', 'popup.html'), path.join('popup', 'popup.css'), 'styles.css']) {
   const dest = path.join(extDist, path.basename(file));
   await cp(path.join(extSrc, file), dest);
   outputs.push(rel(dest));

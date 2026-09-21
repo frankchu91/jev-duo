@@ -1,0 +1,165 @@
+/*
+ * jev-duo popup styles. Compact, system-font, 360px wide; mirrors ../styles.css's light/dark palette
+ * (via custom properties, so each color is declared once per theme) so the popup and the on-page fold
+ * bar read as one product. No framework, no build step for this file (build.mjs just copies it
+ * alongside popup.html).
+ */
+
+:root {
+  --bg: #ffffff;
+  --fg: #35353c;
+  --muted: #6b6b73;
+  --border: #dcdce2;
+  --field-bg: #f0f0f3;
+  --error: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c20;
+    --fg: #d6d6dc;
+    --muted: #a4a4ac;
+    --border: #3a3a41;
+    --field-bg: #26262b;
+    --error: #ff6b6b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 360px;
+  margin: 0;
+  padding: 10px 14px 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.jd-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+h1 {
+  font-size: 15px;
+  margin: 0;
+  flex: 1;
+}
+
+.jd-version,
+.jd-status,
+.jd-value,
+.jd-footer {
+  color: var(--muted);
+}
+
+h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+.jd-section {
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.jd-section:last-of-type {
+  border-bottom: none;
+}
+
+textarea,
+select,
+input[type="text"],
+input[type="password"],
+button {
+  font: inherit;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--field-bg);
+  color: var(--fg);
+}
+
+textarea,
+select,
+input[type="text"],
+input[type="password"] {
+  width: 100%;
+  margin-top: 2px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  opacity: 0.85;
+}
+
+.jd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.jd-status {
+  margin: 4px 0;
+}
+
+.jd-status.error {
+  color: var(--error);
+}
+
+.jd-rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.jd-rules li {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.jd-value {
+  min-width: 32px;
+  text-align: right;
+}
+
+.jd-field {
+  display: block;
+  margin-top: 6px;
+}
+
+.jd-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.jd-footer {
+  font-size: 11px;
+  text-align: center;
+  margin: 4px 0 0;
+}

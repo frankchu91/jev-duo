@@ -3,26 +3,86 @@
   <head>
     <meta charset="utf-8" />
     <title>jev-duo</title>
-    <style>
-      body {
-        font: 14px/1.4 system-ui, sans-serif;
-        margin: 0;
-        padding: 12px 16px;
-        min-width: 240px;
-      }
-      h1 {
-        font-size: 16px;
-        margin: 0 0 4px;
-      }
-      p {
-        margin: 0;
-        color: #666;
-      }
-    </style>
+    <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <h1>jev-duo</h1>
-    <p id="v"></p>
+    <header class="jd-header">
+      <span class="jd-logo" aria-hidden="true">⚡</span>
+      <h1>jev-duo</h1>
+      <span id="v" class="jd-version"></span>
+    </header>
+
+    <section class="jd-section">
+      <h2>What to hide / keep</h2>
+      <textarea id="intent" rows="4" placeholder="e.g. Hide crypto shilling and ragebait. Keep posts from people I follow."></textarea>
+      <div class="jd-row">
+        <button id="compile" type="button">Compile</button>
+        <span id="compile-status" class="jd-status"></span>
+      </div>
+    </section>
+
+    <section class="jd-section">
+      <h2>Rules</h2>
+      <ul id="rules" class="jd-rules"></ul>
+    </section>
+
+    <section class="jd-section">
+      <h2>Strictness</h2>
+      <div class="jd-row">
+        <input type="range" id="strictness" min="0" max="1" step="0.05" />
+        <span id="strictness-value" class="jd-value"></span>
+      </div>
+    </section>
+
+    <section class="jd-section">
+      <h2>Brains</h2>
+      <p id="brain-status" class="jd-status"></p>
+      <label class="jd-field">
+        Provider
+        <select id="provider">
+          <option value="mock">mock</option>
+          <option value="openrouter">openrouter</option>
+          <option value="typesafe">typesafe</option>
+        </select>
+      </label>
+      <div id="field-openrouter" class="jd-field" hidden>
+        <label for="key-openrouter">OpenRouter key</label>
+        <input type="password" id="key-openrouter" autocomplete="off" />
+      </div>
+      <div id="field-typesafe" class="jd-field" hidden>
+        <label for="key-typesafe">TypeSafe key</label>
+        <input type="password" id="key-typesafe" autocomplete="off" />
+      </div>
+      <div id="field-anthropic" class="jd-field" hidden>
+        <label for="key-anthropic">Anthropic key</label>
+        <input type="password" id="key-anthropic" autocomplete="off" />
+      </div>
+      <label class="jd-field">
+        LLM model
+        <input type="text" id="llm-model" />
+      </label>
+      <label class="jd-checkbox"><input type="checkbox" id="arbiter" /> Ask the slow brain when unsure</label>
+    </section>
+
+    <section class="jd-section">
+      <h2>Sites</h2>
+      <label class="jd-checkbox"><input type="checkbox" id="site-x" /> X</label>
+      <label class="jd-checkbox"><input type="checkbox" id="site-reddit" /> Reddit</label>
+      <label class="jd-checkbox"><input type="checkbox" id="site-hn" /> Hacker News</label>
+    </section>
+
+    <section class="jd-section">
+      <h2>Stats</h2>
+      <p id="stats" class="jd-status"></p>
+      <p id="examples" class="jd-status"></p>
+      <div class="jd-row">
+        <button id="recompile" type="button">Recompile from feedback</button>
+        <button id="reset-stats" type="button">Reset</button>
+      </div>
+    </section>
+
+    <p id="mock-hint" class="jd-footer">mock mode: deterministic fake providers, no API keys used.</p>
+
     <script src="popup.js"></script>
   </body>
 </html>
