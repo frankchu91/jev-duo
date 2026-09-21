@@ -62,6 +62,37 @@ describe('fetchJson', () => {
     await assertion;
   });
 
+  it('(e2) retries through repeated timeouts under the default backoff, then rejects retryable after exhausting attempts', async () => {
+    vi.useFakeTimers();
+    // No `sleep` override: this drives the real setTimeout-based default sleep (the inter-attempt
+    // backoff), not just the per-attempt timeout, so it exercises http.ts's catch-block retry path
+    // (the branch that sleeps and retries after a timeout, as opposed to after a bad HTTP status).
+    const fetchImpl = vi.fn(() => new Promise<Response>(() => {}));
+    const promise = fetchJson('https://x.test/e2', {}, { timeoutMs: 50, retries: 2, fetchImpl });
+    const assertion = expect(promise).rejects.toMatchObject({
+      retryable: true,
+      message: expect.stringContaining('timeout'),
+    });
+    await vi.runAllTimersAsync();
+    await assertion;
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('(e3) recovers when a later attempt succeeds after earlier attempts time out', async () => {
+    vi.useFakeTimers();
+    const recovered = { recovered: true };
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => {}))
+      .mockImplementationOnce(() => new Promise<Response>(() => {}))
+      .mockResolvedValueOnce(jsonRes(recovered));
+    const promise = fetchJson('https://x.test/e3', {}, { timeoutMs: 50, retries: 2, fetchImpl });
+    const assertion = expect(promise).resolves.toEqual(recovered);
+    await vi.runAllTimersAsync();
+    await assertion;
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
   it('(f) rejects immediately with AbortError for an already-aborted signal, without calling fetch', async () => {
     const controller = new AbortController();
     controller.abort();
@@ -70,6 +101,26 @@ describe('fetchJson', () => {
       name: 'AbortError',
     });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('(f2) propagates a mid-flight AbortError without retrying', async () => {
+    const controller = new AbortController();
+    // A realistic fetchImpl: it ignores nothing and rejects with an AbortError itself once the
+    // signal it was handed aborts, the way native fetch does.
+    const fetchImpl = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
+        });
+      });
+    });
+    const promise = fetchJson('https://x.test/f2', {}, { signal: controller.signal, fetchImpl, retries: 2 });
+    // Abort after the call has started (the request is in flight, listeners are already wired),
+    // not before it as in (f), so this exercises the mid-flight-abort branch instead of the
+    // already-aborted pre-check.
+    queueMicrotask(() => controller.abort());
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it('(g) honours a retry-after-ms header on a retryable response', async () => {
