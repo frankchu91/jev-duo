@@ -69,4 +69,16 @@ describe('providerConfigFromEnv', () => {
     );
     expect(config.keys).toEqual({ openrouter: 'or-key', typesafe: 'ts-key', anthropic: 'an-key' });
   });
+
+  it('(h) an unknown --provider value throws a clean usage error naming the allowed values', () => {
+    expect(() => providerConfigFromEnv({}, { provider: 'oops' })).toThrow(
+      'unknown --provider "oops" (expected mock, openrouter or typesafe)',
+    );
+  });
+
+  it('(i) an unknown --llm value throws a clean usage error naming the allowed values', () => {
+    expect(() => providerConfigFromEnv({}, { llm: 'oops' })).toThrow(
+      'unknown --llm "oops" (expected mock, openrouter or anthropic)',
+    );
+  });
 });

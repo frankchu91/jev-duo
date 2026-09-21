@@ -1,24 +1,19 @@
 import { readFile } from 'node:fs/promises';
 import { DuoAgent, parsePack, resolveProviders, type Item } from '../../core/index.js';
 import type { RunCtx } from '../args.js';
+import { parseJsonl } from '../jsonl.js';
 import { providerConfigFromEnv } from '../providers.js';
 import { renderJsonl, renderTable } from '../render.js';
 import { NO_KEY_NOTE } from '../usage.js';
 
+const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
 /** Parses JSON-lines `Item`s; a line that fails to parse is warned about on stderr and skipped,
  * rather than aborting the whole batch. */
 function parseItemsJsonl(text: string, stderr: (s: string) => void): Item[] {
-  const items: Item[] = [];
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line) continue;
-    try {
-      items.push(JSON.parse(line) as Item);
-    } catch {
-      stderr(`warning: skipping invalid item line: ${line.slice(0, 80)}\n`);
-    }
-  }
-  return items;
+  return parseJsonl<Item>(text, (lineNo, err) => {
+    stderr(`warning: skipping invalid item line ${lineNo}: ${describeError(err)}\n`);
+  });
 }
 
 /** `judge --pack pack.json [--input items.jsonl]`: judges JSONL items (file or stdin) against a

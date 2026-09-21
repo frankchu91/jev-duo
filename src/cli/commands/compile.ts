@@ -1,23 +1,18 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { compile as compilePack, resolveProviders, type Example } from '../../core/index.js';
 import type { RunCtx } from '../args.js';
+import { parseJsonl } from '../jsonl.js';
 import { providerConfigFromEnv } from '../providers.js';
 import { NO_KEY_NOTE } from '../usage.js';
+
+const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Parses JSON-lines `Example`s (past corrections fed back into the compile prompt); a line that
  * fails to parse is warned about on stderr and skipped, rather than aborting the whole batch. */
 function parseExamplesJsonl(text: string, stderr: (s: string) => void): Example[] {
-  const examples: Example[] = [];
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line) continue;
-    try {
-      examples.push(JSON.parse(line) as Example);
-    } catch {
-      stderr(`warning: skipping invalid feedback line: ${line.slice(0, 80)}\n`);
-    }
-  }
-  return examples;
+  return parseJsonl<Example>(text, (lineNo, err) => {
+    stderr(`warning: skipping invalid feedback line ${lineNo}: ${describeError(err)}\n`);
+  });
 }
 
 /** `compile "<intent>" [--with-feedback file.jsonl] [--out file.json]`: compiles a plain-English
