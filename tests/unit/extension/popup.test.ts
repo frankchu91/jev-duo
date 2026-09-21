@@ -27,6 +27,16 @@ function flush(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
 
+/** An externally-resolvable promise, for tests that need to observe popup.ts's state (button disabled,
+ * status text) *while* a `send` call is still in flight, before choosing how it resolves. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 const PACK: QuestionPack = {
   version: 1,
   intent: 'Hide crypto shilling.',
@@ -373,5 +383,165 @@ describe('initPopup', () => {
     doc.dispatchEvent(new Event('unload'));
     await vi.advanceTimersByTimeAsync(4000);
     expect(getStateCalls).toBe(3); // no further calls after unload: the interval was cleared
+  });
+
+  // --- Fix round 1: submit re-entrancy guard (Compile/Recompile/Reset) ---
+
+  it('Compile is guarded against double-click, disables Recompile too while pending, and re-enables after resolving ok:true', async () => {
+    const doc = loadDoc();
+    const calls: Request[] = [];
+    const pending = deferred<Response>();
+    const send = vi.fn(async (req: Request): Promise<Response> => {
+      calls.push(req);
+      if (req.type === 'getState') return getStateResponse({ pack: undefined });
+      if (req.type === 'compile') return pending.promise;
+      return { ok: false, error: 'unhandled' };
+    });
+    await initPopup(doc, { send: asSend(send) });
+
+    const compileBtn = el<HTMLButtonElement>(doc, 'compile');
+    const recompileBtn = el<HTMLButtonElement>(doc, 'recompile');
+
+    compileBtn.click();
+    compileBtn.click(); // a second click while the first is still in flight must be a no-op
+
+    expect(calls.filter((c) => c.type === 'compile')).toHaveLength(1);
+    expect(compileBtn.disabled).toBe(true);
+    expect(recompileBtn.disabled).toBe(true); // mutual exclusion while a compile is pending
+    expect(el(doc, 'compile-status').textContent).toBe('compiling…');
+
+    pending.resolve({ ok: true, type: 'compile', pack: RECOMPILED_PACK });
+    await flush();
+
+    expect(compileBtn.disabled).toBe(false);
+    expect(recompileBtn.disabled).toBe(false);
+    expect(el(doc, 'compile-status').textContent).toBe('compiled 2 rules, 1 keeps');
+
+    doc.dispatchEvent(new Event('unload'));
+  });
+
+  it('Compile re-enables both buttons after resolving ok:false, and shows the error', async () => {
+    const doc = loadDoc();
+    const pending = deferred<Response>();
+    const send = vi.fn(async (req: Request): Promise<Response> => {
+      if (req.type === 'getState') return getStateResponse();
+      if (req.type === 'compile') return pending.promise;
+      return { ok: false, error: 'unhandled' };
+    });
+    await initPopup(doc, { send: asSend(send) });
+
+    const compileBtn = el<HTMLButtonElement>(doc, 'compile');
+    const recompileBtn = el<HTMLButtonElement>(doc, 'recompile');
+    compileBtn.click();
+    expect(compileBtn.disabled).toBe(true);
+    expect(recompileBtn.disabled).toBe(true);
+
+    pending.resolve({ ok: false, error: 'llm provider unavailable' });
+    await flush();
+
+    expect(compileBtn.disabled).toBe(false);
+    expect(recompileBtn.disabled).toBe(false);
+    expect(el(doc, 'compile-status').textContent).toBe('llm provider unavailable');
+    expect(el(doc, 'compile-status').classList.contains('error')).toBe(true);
+
+    doc.dispatchEvent(new Event('unload'));
+  });
+
+  it('Recompile likewise disables Compile while pending (the reverse direction), and both re-enable after', async () => {
+    const doc = loadDoc();
+    const pending = deferred<Response>();
+    const send = vi.fn(async (req: Request): Promise<Response> => {
+      if (req.type === 'getState') return getStateResponse();
+      if (req.type === 'recompile') return pending.promise;
+      return { ok: false, error: 'unhandled' };
+    });
+    await initPopup(doc, { send: asSend(send) });
+
+    const compileBtn = el<HTMLButtonElement>(doc, 'compile');
+    const recompileBtn = el<HTMLButtonElement>(doc, 'recompile');
+    recompileBtn.click();
+
+    expect(recompileBtn.disabled).toBe(true);
+    expect(compileBtn.disabled).toBe(true);
+    expect(el(doc, 'compile-status').textContent).toBe('recompiling…');
+
+    pending.resolve({ ok: true, type: 'recompile', pack: RECOMPILED_PACK });
+    await flush();
+
+    expect(recompileBtn.disabled).toBe(false);
+    expect(compileBtn.disabled).toBe(false);
+    expect(el(doc, 'compile-status').textContent).toBe('recompiled 2 rules, 1 keeps');
+
+    doc.dispatchEvent(new Event('unload'));
+  });
+
+  it('Reset is guarded against double-click while its own request is pending', async () => {
+    const doc = loadDoc();
+    const calls: Request[] = [];
+    const pending = deferred<Response>();
+    const send = vi.fn(async (req: Request): Promise<Response> => {
+      calls.push(req);
+      if (req.type === 'getState') return getStateResponse();
+      if (req.type === 'resetStats') return pending.promise;
+      return { ok: false, error: 'unhandled' };
+    });
+    await initPopup(doc, { send: asSend(send) });
+
+    const resetBtn = el<HTMLButtonElement>(doc, 'reset-stats');
+    resetBtn.click();
+    resetBtn.click(); // second click while pending: no-op
+
+    expect(calls.filter((c) => c.type === 'resetStats')).toHaveLength(1);
+    expect(resetBtn.disabled).toBe(true);
+
+    pending.resolve({ ok: true, type: 'resetStats' });
+    await flush();
+
+    expect(resetBtn.disabled).toBe(false);
+
+    doc.dispatchEvent(new Event('unload'));
+  });
+
+  // --- Fix round 1: visible, self-recovering error when the initial getState fails ---
+
+  it('shows a visible error when the initial getState fails, and leaves every control usable', async () => {
+    const doc = loadDoc();
+    const send = makeFakeSend((req) => (req.type === 'getState' ? { ok: false, error: 'boom' } : { ok: false, error: 'unhandled' }));
+    await initPopup(doc, { send: asSend(send) });
+
+    const status = el(doc, 'compile-status').textContent ?? '';
+    expect(status).toContain('boom');
+    expect(status).toContain('reopen the popup');
+    expect(el(doc, 'compile-status').classList.contains('error')).toBe(true);
+
+    // "Controls stay usable": nothing about the failed load disables the form.
+    expect(el<HTMLTextAreaElement>(doc, 'intent').disabled).toBe(false);
+    expect(el<HTMLButtonElement>(doc, 'compile').disabled).toBe(false);
+    expect(el<HTMLButtonElement>(doc, 'recompile').disabled).toBe(false);
+    expect(el<HTMLButtonElement>(doc, 'reset-stats').disabled).toBe(false);
+
+    doc.dispatchEvent(new Event('unload'));
+  });
+
+  it('recovers once a later getState succeeds: the next refresh tick fills the intent textarea', async () => {
+    vi.useFakeTimers();
+    const doc = loadDoc();
+    let getStateCalls = 0;
+    const send = makeFakeSend((req) => {
+      if (req.type !== 'getState') return { ok: false, error: 'unhandled' };
+      getStateCalls += 1;
+      return getStateCalls === 1 ? { ok: false, error: 'boom' } : getStateResponse();
+    });
+    await initPopup(doc, { send: asSend(send) });
+    expect(el<HTMLTextAreaElement>(doc, 'intent').value).toBe(''); // not filled: the initial load failed
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(el<HTMLTextAreaElement>(doc, 'intent').value).toBe(SETTINGS.intent);
+    expect(el(doc, 'strictness-value').textContent).toBe('50%');
+    expect(el(doc, 'compile-status').textContent).toBe(''); // the stale "couldn't reach..." message is cleared on recovery
+    expect(el(doc, 'compile-status').classList.contains('error')).toBe(false);
+
+    doc.dispatchEvent(new Event('unload'));
   });
 });

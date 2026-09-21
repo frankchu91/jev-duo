@@ -40,6 +40,20 @@ function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (.
   };
 }
 
+/** Re-entrancy guard for a submit-style button: a click is ignored while any button in `buttons` is
+ * already disabled (covers both a literal double-click and, for Compile/Recompile, one blocking the
+ * other since both mutate the same compiled pack). Disables every button in the group for the duration
+ * of `task`, always re-enabling in a `finally` even if `task` throws/rejects. */
+function guardClick(buttons: HTMLButtonElement[], task: () => Promise<void>): () => void {
+  return () => {
+    if (buttons.some((b) => b.disabled)) return;
+    for (const b of buttons) b.disabled = true;
+    void task().finally(() => {
+      for (const b of buttons) b.disabled = false;
+    });
+  };
+}
+
 function renderRules(doc: Document, listEl: HTMLElement, pack: QuestionPack | undefined): void {
   listEl.textContent = '';
   if (!pack) return;
@@ -136,12 +150,25 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
     }
   }
 
-  /** Re-fetches state and refreshes only the read-only displays (stats/examples/brain status) — never
-   * the input controls, since a periodic tick or a Reset click must not clobber whatever the user is
-   * mid-editing in the intent box or the settings fields. */
+  // Set once if the very first `getState` (below) fails, so the popup doesn't silently look like a
+  // fresh install forever: the next `refresh()` that succeeds re-fills every control from real
+  // settings (not just the read-only stats it normally touches), then clears this so later ticks go
+  // back to their normal stats-only refresh.
+  let loadFailed = false;
+
+  /** Re-fetches state. Normally refreshes only the read-only displays (stats/examples/brain status) —
+   * never the input controls, since a periodic tick or a Reset click must not clobber whatever the
+   * user is mid-editing in the intent box or the settings fields — unless the initial load never
+   * populated those controls in the first place (`loadFailed`), in which case this does that catch-up
+   * fill exactly once. */
   async function refresh(): Promise<void> {
     const res = await send({ type: 'getState' });
     if (!res.ok || res.type !== 'getState') return;
+    if (loadFailed) {
+      fillSettings(res.settings);
+      setCompileStatus('', false); // clear the stale "couldn't reach the extension" message now that it's recovered
+      loadFailed = false;
+    }
     fillStats(res.stats, res.exampleCount);
     brainStatusEl.textContent = `fast brain: ${res.providers.jev} · slow brain: ${res.providers.llm}`;
   }
@@ -151,15 +178,32 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
   };
   const currentSites = (): Settings['enabledSites'] => ({ x: siteXEl.checked, reddit: siteRedditEl.checked, hn: siteHnEl.checked });
 
-  compileBtn.addEventListener('click', () => {
-    void send({ type: 'compile', intent: intentEl.value }).then((res) => handleCompileResult(res, 'compiled'));
-  });
-  recompileBtn.addEventListener('click', () => {
-    void send({ type: 'recompile' }).then((res) => handleCompileResult(res, 'recompiled'));
-  });
-  resetBtn.addEventListener('click', () => {
-    void send({ type: 'resetStats' }).then(() => refresh());
-  });
+  // Compile and Recompile both mutate the one compiled pack, so a click on either disables both (not
+  // just itself) until the request settles — otherwise a double-click, or a Recompile fired mid-Compile,
+  // would queue up duplicate LLM calls in a live provider mode.
+  compileBtn.addEventListener(
+    'click',
+    guardClick([compileBtn, recompileBtn], async () => {
+      setCompileStatus('compiling…', false);
+      const res = await send({ type: 'compile', intent: intentEl.value });
+      handleCompileResult(res, 'compiled');
+    }),
+  );
+  recompileBtn.addEventListener(
+    'click',
+    guardClick([compileBtn, recompileBtn], async () => {
+      setCompileStatus('recompiling…', false);
+      const res = await send({ type: 'recompile' });
+      handleCompileResult(res, 'recompiled');
+    }),
+  );
+  resetBtn.addEventListener(
+    'click',
+    guardClick([resetBtn], async () => {
+      await send({ type: 'resetStats' });
+      await refresh();
+    }),
+  );
 
   const debouncedIntent = debounce((v: string) => patchSettings({ intent: v }), DEBOUNCE_MS);
   const debouncedModel = debounce((v: string) => patchSettings({ llmModel: v }), DEBOUNCE_MS);
@@ -193,6 +237,13 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
     fillSettings(initial.settings);
     fillStats(initial.stats, initial.exampleCount);
     brainStatusEl.textContent = `fast brain: ${initial.providers.jev} · slow brain: ${initial.providers.llm}`;
+  } else {
+    // Controls are left exactly as popup.html renders them (nothing here disables anything) — still
+    // usable, just not yet filled with real settings — and the next successful `refresh()` tick will
+    // catch up via `loadFailed`, so the popup recovers on its own instead of needing a manual reopen.
+    loadFailed = true;
+    const message = !initial.ok ? initial.error : 'unexpected response from the extension';
+    setCompileStatus(`couldn't reach the extension: ${message} — reopen the popup`, true);
   }
 
   const timer = setInterval(() => void refresh(), STATS_REFRESH_MS);
