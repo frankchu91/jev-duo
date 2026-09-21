@@ -4,9 +4,24 @@
   "description": "A two-brain agent that reads your feeds with you: an LLM writes the rules, Jev enforces them at 100ms per post.",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "jev",
+    "typesafe",
+    "system-one",
+    "chrome-extension",
+    "feed-filter",
+    "x",
+    "reddit",
+    "hacker-news",
+    "llm"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/frankchu91/jev-duo.git"
+  },
+  "homepage": "https://github.com/frankchu91/jev-duo#readme",
+  "bugs": {
+    "url": "https://github.com/frankchu91/jev-duo/issues"
   },
   "engines": {
     "node": ">=20"
