@@ -22,6 +22,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:live": "LIVE=1 playwright test",
     "build": "node scripts/build.mjs",
     "build:icons": "node scripts/make-icons.mjs",
     "package:ext": "node scripts/package-extension.mjs",
