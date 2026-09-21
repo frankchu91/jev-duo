@@ -45,8 +45,9 @@ single file to move between machines. Chrome 120 or newer is required.
 | Mock | nothing | a keyword-overlap stand-in for Jev and a comma-splitting stand-in for the LLM |
 
 One OpenRouter key is the short path because it reaches both brains. In the popup, pick the provider
-and paste the key; keys are stored in `chrome.storage.local` and never leave your browser except as
-`Authorization` headers to that provider. Changing the provider or a key clears the verdict cache, so
+and paste the key; keys are stored in `chrome.storage.local` and leave your browser only as the
+request header the provider itself requires — `Authorization: Bearer ...` for TypeSafe and
+OpenRouter, `x-api-key` for Anthropic. Changing the provider or a key clears the verdict cache, so
 a probability from one provider is never served as if it came from another.
 
 For the CLI, set the same variables in your shell or in a `.env` file at the repo root. Shell
@@ -68,6 +69,9 @@ stderr.
 5. Tune with the **Strictness** slider. It offsets every threshold at decision time (clamped to
    [0.5, 0.95]) without editing the stored pack. Per-site toggles and a stats panel (judged, folded,
    kept by rule, errors, p50 latency, estimated cost) are in the same popup.
+6. Check the page line under the stats. It reads `N posts seen on <site>` for the tab the popup was
+   opened over, or `0 posts seen on this page — the site's layout may have changed` when the
+   adapter found nothing, which is what a site redesign looks like from the inside.
 
 ## CLI
 
@@ -84,7 +88,7 @@ Commands:
   hn        Judge the Hacker News front page with your rules
   compile   Turn a plain-English intent into a question pack
   judge     Judge JSONL items (file or stdin) against a pack
-  demo      Run "hn" with mock providers and a built-in intent (no keys)
+  demo      Judge a bundled sample feed with mock providers (no keys, no network)
 ```
 
 ```bash
@@ -97,17 +101,39 @@ jev-duo compile "Hide crypto shilling and ragebait. Keep anything about Rust." -
 # 3. judge: run a pack over JSONL items from a file or stdin
 jev-duo judge --pack pack.json --input items.jsonl --json
 
-# 4. demo: the whole loop with no keys at all
+# 4. demo: the whole loop with no keys and no network at all
 jev-duo demo
 ```
 
 `--provider mock|openrouter|typesafe` picks the fast brain and `--llm mock|openrouter|anthropic`
 picks the slow one; they resolve independently, so `--provider mock --llm openrouter` is a valid
-pair. Without flags, each is chosen from whichever keys are present. Exit codes: `0` success,
+pair. Without flags, each is chosen from whichever keys are present. `--arbiter` turns on the slow
+brain's second opinion for gray-zone posts, which is off by default here (one command judges dozens
+of posts, so those LLM calls should be asked for). `--limit` (1-100) and `--strictness` (0-1) are
+validated: a typo is a usage error, not a silent fall back to the default. Exit codes: `0` success,
 `1` usage error, `2` provider error after retries.
 
-A real `jev-duo demo` run (first 12 lines and the footer; it fetches the live front page, so your
-output will differ):
+`jev-duo demo` compiles a built-in intent and judges a bundled eight-post sample feed, so it needs
+no keys and no network and prints the same thing on every machine — this is the real output:
+
+```
+jev-duo demo — mock providers, bundled sample feed
+ 1 ⚡ crypto 98%     New DogeMoon token launch today, buy the presale now before it moons, crypto gem
+ 2 ⚡ crypto 98%     Bitcoin ICO airdrop is live, join our crypto token launch, staking rewards and m
+ 3 ⚡ political outrage 98% Political outrage erupts as politicians trade furious insults in a partisan shou
+ 4 ⚡ layoffs drama 88% Company announces massive layoffs, thousands of employees laid off in a brutal w
+ 5 ◐ product launch announcem 98% We are thrilled to announce the launch of our new product today, available now f
+ 6 ★                Rust 1.90 released with new async traits and improved compiler diagnostics for e
+ 7 ★                A deep dive into how modern databases handle query planning, indexing, and repli
+ 8 ✓                A simple recipe for weeknight pasta with garlic, olive oil, and fresh basil from
+judged 8 · folded 4 · dimmed 1 · kept 3 · errors 0 · p50 0ms · ~$0.0000
+```
+
+`⚡` is a fold, `◐` a dim, `◦` a badge, `★` a keep forced by a keep-rule, `✓` a plain keep.
+
+`jev-duo demo --live` runs the same intent against the real Hacker News front page instead (first
+lines of one run; yours will differ, and the mock fast brain scores by keyword overlap rather than
+by reading, so it folds far less than real Jev would):
 
 ```
 jev-duo demo — mock providers, Hacker News front page
@@ -116,20 +142,9 @@ jev-duo demo — mock providers, Hacker News front page
  3 ★                AX – Google’s Open Agentic Orchestrator
  4 ✓                What happened to the Snowden archive
  5 ✓                Samsung is expected to more than double output of its HBM4 and HBM4E DRAM
- 6 ✓                Spain orders blocks on Archive.today and its mirrors
- 7 ✓                ZuckOff Know when a camera is in the room
- 8 ✓                I am often wrong
- 9 ✓                Singapore’s National Library Board offers micropayments to build reading habits
-10 ✓                The Effect of CRTs on Pixel Art (2024)
-11 ✓                Grim Fandango Puzzle Document (1996) [pdf]
-12 ★                Sherline Tools Is Going Out of Business
 ...
 judged 30 · folded 0 · dimmed 0 · kept 30 · errors 0 · p50 0ms · ~$0.0002
 ```
-
-`✓` is a plain keep, `★` a keep forced by a keep-rule, `⚡` a fold, `◐` a dim, `◦` a badge. The demo
-uses the mock fast brain, which scores by keyword overlap rather than by reading, so it folds far
-less than real Jev would. Point it at a real key to see the difference.
 
 ## Writing good intents
 
@@ -153,7 +168,7 @@ Five things that make its job easier:
 |---|---|---|
 | Compile an intent into a question pack | System 2 (LLM) | Writing well-posed, independent questions is deliberate work. Done once per intent. |
 | Judge every post in the feed | System 1 (Jev) | Roughly 100 ms per post and $0.042 per million input tokens, output free. Thousands of small typed judgments a day. |
-| Second opinion in the gray zone | System 2 (LLM) | Only when a probability lands inside a rule's ambiguous band. Budgeted to 20 calls per 10 minutes per surface; over budget the post stays visible. |
+| Second opinion in the gray zone | System 2 (LLM) | Only when a probability lands inside a rule's ambiguous band. Budgeted to 20 calls per 10 minutes per surface; over budget the post stays visible. On by default in the extension, opt-in (`--arbiter`) in the CLI. |
 | Learn from your corrections | System 2 (LLM) | A recompile with up to 40 recent examples, asked for the smallest rewording that fixes them. |
 
 ## Privacy
@@ -161,18 +176,24 @@ Five things that make its job easier:
 - **No backend.** There is no jev-duo server. The extension and the CLI talk to your providers
   directly.
 - **Keys stay local.** In the extension they live in `chrome.storage.local`; in the CLI they come
-  from the environment or a `.env` file you own.
+  from the environment or a `.env` file you own. They leave the browser only as the provider's own
+  auth header — `Authorization: Bearer ...` for TypeSafe and OpenRouter, `x-api-key` for
+  Anthropic — on requests to that provider's API and nowhere else.
 - **Post text goes to exactly one place:** the provider you configured. In mock mode nothing leaves
   the machine at all.
 - **Every API call leaves from the extension's service worker.** The native TypeSafe API rejects
   browser-page CORS (an `OPTIONS` from an arbitrary origin returns `400 Disallowed CORS origin`),
   and a service worker with host permissions is exempt. Content scripts never hold a key or call a
   provider; they only exchange typed messages with the worker.
+- **Content scripts are never sent your keys.** The one message that carries them (`getState`) is
+  refused for anything running in a web page; a content script can ask whether its site is enabled
+  and can report how many posts it saw, and that is all.
 - **Nothing is logged or sent anywhere else.** Counters, the compiled pack and your examples sit in
   `chrome.storage.local`; the verdict cache sits in `chrome.storage.session` and dies with the
   browser session.
-- **Permissions are `storage` plus host permissions** for the three sites and the three API origins.
-  No `tabs`, no `history`.
+- **Permissions are `storage` plus host permissions for the three API origins.** The content
+  scripts get their access from `content_scripts.matches`, not from host permissions. No `tabs`, no
+  `history`.
 
 ## Status & known limits
 
@@ -189,8 +210,8 @@ Five things that make its job easier:
   layer but no v1 feature needs them, so nothing sorts or scores your feed yet.
 - **The arbiter is budgeted.** 20 calls per 10 minutes per surface. Past that, ambiguous posts are
   kept rather than escalated.
-- **The service worker bundle is about 1.3 MB**, almost all of it the Anthropic SDK. It loads fine,
-  but it is the obvious thing to shrink next.
+- **The service worker bundle is about 660 KB minified**, almost all of it the Anthropic SDK. It
+  loads fine, but dropping the SDK for a plain `fetch` is the obvious thing to shrink next.
 
 ## Development
 

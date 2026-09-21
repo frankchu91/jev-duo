@@ -238,8 +238,10 @@ Called only for `pending-arbiter`. Sends the post and the rule
 statements, asks for JSON `{ hide: boolean, ruleId?: string, why: string }`.
 Budget: at most 20 calls per 10 minutes per surface; over budget the
 item stays `keep`. Result overrides the decision and is recorded as an
-`Example` with `source: 'arbiter'`. Off by default in the CLI, on by
-default in the extension when an LLM key is present.
+`Example` with `source: 'arbiter'`. In the CLI it is opt-in behind
+`--arbiter` (one command judges dozens of posts at once, so the LLM
+calls are asked for, never assumed); in the extension it is on by
+default when an LLM key is present.
 
 ### 4.6 Learner
 
@@ -264,9 +266,9 @@ interface LlmProvider {
 ```
 
 Jev: `typesafe` (native HTTP), `openrouter`, `mock`.
-LLM: `anthropic` (Messages API, `claude-sonnet-5` default, browser header
+LLM: `anthropic` (Messages API, `claude-opus-5` default, browser header
 set in the extension), `openrouter` (chat completions, default model
-`anthropic/claude-sonnet-5`), `mock`.
+`anthropic/claude-opus-5`), `mock`.
 
 Mock Jev scores each question by a transparent heuristic: keyword hits
 between the question and the item text, weighted, squashed to [0,1],
@@ -277,15 +279,27 @@ use for exact expectations.
 ## 5. Chrome extension (`src/extension`)
 
 Manifest V3. Permissions: `storage`, host permissions for the three
-sites and the provider API origins. No `tabs`, no `history`.
+provider API origins only — the content scripts get their access from
+`content_scripts.matches`, not from host permissions. No `tabs`, no
+`history` (the popup's `chrome.tabs.query` needs no permission to read
+the active tab's id).
 
 ### 5.1 Components
 
 - `background.ts` (service worker): owns one `DuoAgent`. Handles
   messages: `judge(items[])`, `compile(intent)`, `feedback(example)`,
-  `getState()`, `setSettings(partial)`, `recompile()`. Persists settings,
-  keys, pack and examples in `chrome.storage.local`; verdict cache in
-  `chrome.storage.session`.
+  `getState()`, `isSiteEnabled(platform)`, `pageSeen(platform, seen)`,
+  `setSettings(partial)`, `recompile()`. `getState` returns the full
+  `Settings` (keys included), the resolved `providers` (`{jev, llm}`),
+  `hasKeys`, `exampleCount`, the latest `pageSeen` report per tab, and
+  `stats` — which include `lastSources`, the 50 most recent verdict
+  sources, so the popup can tell a live run from a cached one. Because
+  it carries the keys, `getState` is refused for any message from a web
+  page: a content script asks `isSiteEnabled` instead, which answers one
+  boolean. Persists settings, keys, pack and examples in
+  `chrome.storage.local`; verdict cache in `chrome.storage.session`
+  (written on a 2 s trailing debounce, since each write mirrors the whole
+  cache).
 - `content.ts`: selects an adapter by hostname; injects CSS; runs a
   `MutationObserver` on `document.body`; debounces new post elements
   (150 ms, max batch 10); marks them `data-jd="pending"`; sends `judge`;
@@ -317,7 +331,7 @@ interface Adapter {
 
 ### 5.2 Pending state
 
-Posts are dimmed to opacity 0.6 while pending, restored on `keep`,
+Posts are dimmed to opacity 0.85 while pending, restored on `keep`,
 folded or dimmed on a hide decision. A post that errors is restored
 immediately. Pending never lasts past the 10 s timeout.
 
@@ -336,7 +350,7 @@ confirmed against fixtures captured at build time and documented in
 
 Package bin `jev-duo`.
 
-- `jev-duo hn [--rules "<intent>" | --pack pack.json] [--limit 30] [--provider mock|openrouter|typesafe] [--llm mock|openrouter|anthropic] [--strictness 0.7] [--json]`
+- `jev-duo hn [--rules "<intent>" | --pack pack.json] [--limit 30] [--provider mock|openrouter|typesafe] [--llm mock|openrouter|anthropic] [--strictness 0.7] [--arbiter] [--json]`
   Fetches the Hacker News front page (Algolia `search?tags=front_page`),
   judges every story, prints a table: rank, decision glyph, label and
   percentage, title. Folded stories are printed dimmed on one line.
@@ -344,7 +358,15 @@ Package bin `jev-duo`.
 - `jev-duo compile "<intent>" [--out pack.json] [--with-feedback examples.jsonl]`
 - `jev-duo judge --pack pack.json [--input items.jsonl] [--json]`
   Reads items from a file or stdin.
-- `jev-duo demo` = `hn --provider mock --llm mock --rules "<built-in demo intent>"`.
+- `jev-duo demo [--live]` compiles a built-in demo intent with the mock
+  LLM and judges a bundled 8-item sample feed (`src/cli/sample-feed.ts`,
+  the same items as `tests/e2e/fixtures/items.jsonl`) with the mock Jev:
+  no keys, no network, the same verdicts on every machine. `--live`
+  judges the real Hacker News front page instead.
+
+`--limit` (integer, 1..100) and `--strictness` (0..1) are validated:
+an out-of-range or non-numeric value is a usage error (exit 1), never a
+silent fall back to the default.
 
 Keys from env: `OPENROUTER_API_KEY`, `TYPESAFE_API_KEY`,
 `ANTHROPIC_API_KEY`. With no key and no `--provider`, the CLI uses mock
@@ -370,6 +392,12 @@ the README says so.
 | LLM returns invalid JSON | One retry with validation error appended, then compile fails visibly; previous pack stays active |
 | Adapter cannot extract | Element skipped, no pending state applied |
 | Site DOM changed | Adapter finds zero posts; popup shows "0 posts seen on this page" so the failure is visible |
+
+The last row is implemented by the `pageSeen` report: the content script
+sends its post count to the background after the initial scan and after
+any later scan that changes it (debounced, at most one per second); the
+background keeps the latest report per tab and returns them all from
+`getState`, and the popup shows the one for the tab it was opened over.
 
 ## 9. Testing strategy
 
