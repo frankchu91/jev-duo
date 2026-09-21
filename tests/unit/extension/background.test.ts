@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { verdictKey } from '../../../src/core/cache';
 import { AUTO_RECOMPILE_EVERY } from '../../../src/core/constants';
-import type { Example, Item } from '../../../src/core/types';
+import type { Example, Item, Verdict } from '../../../src/core/types';
 import { createBackground } from '../../../src/extension/background';
 import type { Response as MessageResponse } from '../../../src/extension/messages';
 import { installChromeStub } from './chrome-stub';
@@ -114,8 +115,12 @@ describe('background', () => {
       }
       expect(last).toMatchObject({ ok: true, type: 'feedback', recompiled: true, exampleCount: AUTO_RECOMPILE_EVERY });
 
-      const stored = (await chrome.storage.local.get('examples')).examples as { examples: unknown[] } | undefined;
+      const stored = (await chrome.storage.local.get('examples')).examples as { examples: unknown[]; sinceRecompile: number } | undefined;
       expect(stored?.examples).toHaveLength(AUTO_RECOMPILE_EVERY);
+      // RULING (d): recompile() calls markRecompiled() (sinceRecompile -> 0) on the live store AFTER
+      // the pre-recompile save already persisted sinceRecompile === 10; the persisted JSON must reflect
+      // the post-recompile counter, not the stale one, or a restart would immediately auto-recompile again.
+      expect(stored?.sinceRecompile).toBe(0);
     });
   });
 
@@ -219,10 +224,21 @@ describe('background', () => {
 
       const state = await bg.handle({ type: 'getState' });
       expect(state).toMatchObject({ ok: true, hasKeys: true });
+      // RULING (e): hasKeys means "Jev is live"; `providers` spells out both resolved names so the
+      // popup can show that the slow brain specifically has fallen back to mock.
+      if (state.ok && state.type === 'getState') expect(state.providers).toEqual({ jev: 'typesafe', llm: 'mock' });
 
       const compiled = await bg.handle({ type: 'compile', intent: 'Hide spam.' });
       if (!compiled.ok || compiled.type !== 'compile') throw new Error('expected a compile response');
       expect(compiled.pack.compiledBy).toBe('mock'); // no anthropic key: llm degrades to mock
+    });
+
+    it('reports providers: {jev:"mock", llm:"mock"} in default mock mode', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.providers).toEqual({ jev: 'mock', llm: 'mock' });
     });
   });
 
@@ -267,6 +283,181 @@ describe('background', () => {
       if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
       expect(state.settings.pack?.intent).toBe('Hide spam.');
       expect(state.exampleCount).toBe(1);
+    });
+
+    // IMPORTANT #1: chrome.storage.session persists across a service-worker restart within the same
+    // browser session, so a single malformed entry written under an older version (or corrupted some
+    // other way) must not throw during cache warm-up and leave `agent` undefined for every handler for
+    // the rest of the session — nor should it prevent well-formed entries from still being served.
+    it('a garbled verdict cache (mixed valid/invalid entries, and a non-array root) never breaks init', async () => {
+      const first = createBackground();
+      await first.ready;
+      const compiled = await first.handle({ type: 'compile', intent: 'Hide spam.' });
+      if (!compiled.ok || compiled.type !== 'compile') throw new Error('expected a compile response');
+      const pack = compiled.pack;
+      const item = mkItem('cached-item');
+      const key = await verdictKey(pack, item);
+      const goodVerdict: Verdict = {
+        itemId: item.id,
+        rules: [{ ruleId: 'spam', p: 0.1 }],
+        keeps: [],
+        decision: { kind: 'keep' },
+        latencyMs: 1,
+        source: 'jev',
+      };
+
+      await chrome.storage.session.set({
+        verdicts: [
+          'garbage-not-an-entry',
+          [42, goodVerdict], // key not a string
+          [key, 'not-an-object'],
+          [key, { itemId: 'x' }], // missing decision/rules/keeps
+          null,
+          [key, goodVerdict], // well-formed: must survive
+        ],
+      });
+
+      const second = createBackground();
+      await second.ready; // must not hang or leave the agent unusable
+
+      const state = await second.handle({ type: 'getState' });
+      expect(state.ok).toBe(true);
+
+      const judged = await second.handle({ type: 'judge', items: [item] });
+      if (!judged.ok || judged.type !== 'judge') throw new Error('expected a judge response');
+      expect(judged.verdicts[0].source).toBe('cache'); // the surviving well-formed entry was warmed
+    });
+  });
+
+  describe('concurrency safety', () => {
+    // IMPORTANT #2: `agent`/`cache` are shared closure variables that setSettings/resetStats reassign;
+    // onMessage can dispatch a judge and a setSettings before either resolves. A judge must always
+    // persist ITS OWN (pre-rebuild) agent's stats, and a rebuild must not happen until that judge has
+    // fully finished — otherwise the wrong instance's (possibly zeroed) stats get persisted, or the
+    // rebuild races the still-running judge's cache flush.
+    it('setSettings issued mid-judge waits for it, persists its stats, then rebuilds for the next call', async () => {
+      // typesafe jev (real HTTP, controllable via fetchImpl) + mock llm (no anthropic key, no fetch at
+      // all) cleanly separates "compile: instant" from "judge: hangs until released".
+      await chrome.storage.local.set({ settings: { providerMode: 'typesafe', keys: { typesafe: 'ts-key' } } });
+
+      let releaseFetch!: (res: globalThis.Response) => void;
+      const gate = new Promise<globalThis.Response>((resolve) => {
+        releaseFetch = resolve;
+      });
+      const fetchImpl = vi.fn().mockReturnValue(gate);
+
+      const bg = createBackground({ fetchImpl });
+      await bg.ready;
+      await bg.handle({ type: 'compile', intent: 'Hide spam.' }); // mock llm: instant, never touches fetchImpl
+
+      const judgePromise = bg.handle({ type: 'judge', items: [mkItem('a')] });
+      await vi.waitFor(() => {
+        if (fetchImpl.mock.calls.length < 1) throw new Error('jev fetch not called yet');
+      });
+
+      // Issued while the judge above is still pending on `gate`.
+      const setSettingsPromise = bg.handle({ type: 'setSettings', patch: { strictness: 1 } });
+
+      releaseFetch(
+        new Response(JSON.stringify({ model: 'jev-latest', answers: { r_spam: { type: 'noul', noul: 0.1 } } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+      const [judgeRes, setRes] = await Promise.all([judgePromise, setSettingsPromise]);
+      if (!judgeRes.ok || judgeRes.type !== 'judge') throw new Error('expected a judge response');
+      expect(judgeRes.verdicts[0].source).toBe('jev');
+      expect(setRes).toEqual({ ok: true, type: 'setSettings' });
+
+      const persistedStats = (await chrome.storage.local.get('stats')).stats as { judged: number } | undefined;
+      expect(persistedStats?.judged).toBe(1); // the judge that actually ran, not the rebuilt (zeroed) agent
+
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.settings.strictness).toBe(1); // the rebuild happened
+      expect(state.stats.judged).toBe(0); // ...and the live agent is the fresh, rebuilt one
+    });
+
+    // Pins down WHY the wait has to happen before ruling (c)'s cache-discard specifically: if a
+    // provider-changing setSettings raced ahead of a still-running judge, the judge's own (delayed)
+    // `saveVerdicts(currentCache.entries())` — using its pre-discard cache reference — would land
+    // AFTER setSettings's `saveVerdicts([])` and silently resurrect the stale, wrong-provider entry.
+    it('a provider-changing setSettings mid-judge still ends with the session verdict mirror cleared, not resurrected', async () => {
+      await chrome.storage.local.set({ settings: { providerMode: 'typesafe', keys: { typesafe: 'ts-key' } } });
+
+      let releaseFetch!: (res: globalThis.Response) => void;
+      const gate = new Promise<globalThis.Response>((resolve) => {
+        releaseFetch = resolve;
+      });
+      const fetchImpl = vi.fn().mockReturnValue(gate);
+
+      const bg = createBackground({ fetchImpl });
+      await bg.ready;
+      await bg.handle({ type: 'compile', intent: 'Hide spam.' });
+
+      const judgePromise = bg.handle({ type: 'judge', items: [mkItem('a')] });
+      await vi.waitFor(() => {
+        if (fetchImpl.mock.calls.length < 1) throw new Error('jev fetch not called yet');
+      });
+
+      // Adds an openrouter key while the judge above is still pending: providerMode/typesafe key are
+      // unchanged, but ruling (c) is "any key", so this must still trigger the cache discard.
+      const setSettingsPromise = bg.handle({ type: 'setSettings', patch: { keys: { typesafe: 'ts-key', openrouter: 'or-key' } } });
+
+      releaseFetch(
+        new Response(JSON.stringify({ model: 'jev-latest', answers: { r_spam: { type: 'noul', noul: 0.1 } } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+      const [judgeRes, setRes] = await Promise.all([judgePromise, setSettingsPromise]);
+      expect(judgeRes.ok).toBe(true);
+      expect(setRes).toEqual({ ok: true, type: 'setSettings' });
+
+      const session = (await chrome.storage.session.get('verdicts')).verdicts;
+      expect(session).toEqual([]); // cleared, and not resurrected by the judge's delayed write
+    });
+  });
+
+  describe('ruling (c): cache invalidation on provider change', () => {
+    it('discards the in-memory cache and clears the session mirror when a key changes (even if providerMode does not)', async () => {
+      await chrome.storage.local.set({ settings: { mockFixtures: { a: { r_spam: 0.95 } } } });
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'compile', intent: 'Hide spam.' });
+
+      const first = await bg.handle({ type: 'judge', items: [mkItem('a')] });
+      if (!first.ok || first.type !== 'judge') throw new Error('expected a judge response');
+      expect(first.verdicts[0].source).toBe('jev');
+
+      const sessionBefore = (await chrome.storage.session.get('verdicts')).verdicts;
+      expect(sessionBefore).toHaveLength(1);
+
+      // providerMode stays 'mock', but a key changed — must still count.
+      await bg.handle({ type: 'setSettings', patch: { keys: { openrouter: 'or-key' } } });
+
+      const sessionAfter = (await chrome.storage.session.get('verdicts')).verdicts;
+      expect(sessionAfter).toEqual([]);
+
+      const second = await bg.handle({ type: 'judge', items: [mkItem('a')] }); // same item, same pack
+      if (!second.ok || second.type !== 'judge') throw new Error('expected a judge response');
+      expect(second.verdicts[0].source).toBe('jev'); // NOT 'cache': the in-memory LruCache was discarded too
+    });
+
+    it('a settings change unrelated to providerMode/keys leaves the cache intact', async () => {
+      await chrome.storage.local.set({ settings: { mockFixtures: { a: { r_spam: 0.95 } } } });
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'compile', intent: 'Hide spam.' });
+      await bg.handle({ type: 'judge', items: [mkItem('a')] });
+
+      await bg.handle({ type: 'setSettings', patch: { strictness: 0.9 } }); // no provider/key change
+
+      const second = await bg.handle({ type: 'judge', items: [mkItem('a')] });
+      if (!second.ok || second.type !== 'judge') throw new Error('expected a judge response');
+      expect(second.verdicts[0].source).toBe('cache'); // still cached
     });
   });
 

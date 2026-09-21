@@ -132,5 +132,29 @@ describe('extension storage', () => {
       const session = await chrome.storage.session.get('verdicts');
       expect(session.verdicts).toEqual([['k1', mkVerdict('a')]]);
     });
+
+    // IMPORTANT #1(a): a single malformed entry must never throw out of loadVerdicts() — it must be
+    // dropped so init()'s cache warm can't blow up on it and leave `agent` undefined for the session.
+    it('loadVerdicts() drops malformed entries, keeping only well-formed [string, Verdict] pairs', async () => {
+      const good: [string, Verdict] = ['k1', mkVerdict('a')];
+      await chrome.storage.session.set({
+        verdicts: [
+          good,
+          'not-an-entry-at-all',
+          [123, mkVerdict('b')], // key not a string
+          ['k2', 'not-an-object'], // verdict not an object
+          ['k3', { itemId: 'x' }], // object, but missing decision/rules/keeps
+          ['k4'], // wrong length
+          null,
+          undefined,
+        ],
+      });
+      expect(await loadVerdicts()).toEqual([good]);
+    });
+
+    it('loadVerdicts() returns [] when the stored value itself is not an array', async () => {
+      await chrome.storage.session.set({ verdicts: 'totally-not-an-array' });
+      expect(await loadVerdicts()).toEqual([]);
+    });
   });
 });

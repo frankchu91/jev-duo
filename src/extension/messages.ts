@@ -44,8 +44,18 @@ export type Response =
   | { ok: true; type: 'feedback'; recompiled: boolean; exampleCount: number }
   // `settings` includes `keys` (raw API keys) verbatim: the popup is the intended, sole reader of
   // getState, so only it should ever send this request. Never surface a getState-driven "settings"
-  // view in the content script or any page context.
-  | { ok: true; type: 'getState'; settings: Settings; stats: DuoStats; exampleCount: number; hasKeys: boolean }
+  // view in the content script or any page context. `hasKeys` means "the Jev provider is live";
+  // `providers` gives the resolved provider names (e.g. `{jev:'typesafe', llm:'mock'}`) so the popup
+  // can show when the slow brain in particular has fallen back to mock even though Jev is live.
+  | {
+      ok: true;
+      type: 'getState';
+      settings: Settings;
+      stats: DuoStats;
+      exampleCount: number;
+      hasKeys: boolean;
+      providers: { jev: string; llm: string };
+    }
   | { ok: true; type: 'setSettings' | 'resetStats' }
   | { ok: false; error: string };
 

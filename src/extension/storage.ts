@@ -66,12 +66,26 @@ export async function saveStats(s: DuoStats): Promise<void> {
   await setLocal(STATS_KEY, s);
 }
 
+const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
+
+/** Structural check only (mirrors learner.ts's `isExample`): enough to reject garbage without a full
+ * schema. A single malformed entry here must never take down `init()` — see `loadVerdicts`. */
+function isVerdictEntry(x: unknown): x is [string, Verdict] {
+  if (!Array.isArray(x) || x.length !== 2) return false;
+  const [key, verdict] = x;
+  return typeof key === 'string' && isPlainObject(verdict) && 'itemId' in verdict && 'decision' in verdict && 'rules' in verdict && 'keeps' in verdict;
+}
+
 /** `chrome.storage.session` mirror of the in-memory verdict cache: oldest -> newest, same order as
- * `LruCache.entries()`, so replaying it with `.set()` into a fresh cache restores the same recency. */
+ * `LruCache.entries()`, so replaying it with `.set()` into a fresh cache restores the same recency.
+ * Filters out anything that isn't a well-formed `[string, Verdict]` pair (including a root value that
+ * isn't even an array) — storage can hold arbitrary garbage from an older version or a corrupt write,
+ * and one bad entry must not break every later handler by throwing during cache warm-up. */
 export async function loadVerdicts(): Promise<Array<[string, Verdict]>> {
   const stored = await chrome.storage.session.get(VERDICTS_KEY);
   const raw = stored[VERDICTS_KEY];
-  return Array.isArray(raw) ? (raw as Array<[string, Verdict]>) : [];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isVerdictEntry);
 }
 
 /** Defensively caps at MAX_VERDICTS even though the caller's LruCache is already sized to match, so
