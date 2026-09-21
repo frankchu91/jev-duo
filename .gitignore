@@ -1,0 +1,13 @@
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.*
+*.log
+.DS_Store
+.claude/
+test-results/
+playwright-report/
+tests/e2e/.profile/
+*.zip
