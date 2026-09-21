@@ -1,0 +1,82 @@
+// Builds the CLI and the Chrome extension with esbuild.
+//
+//   dist/cli/index.js          node ESM bundle, executable (`jev-duo` bin)
+//   dist/extension/*           unpacked Manifest V3 extension
+//
+// Run with `pnpm build`. Icons must exist first (`pnpm build:icons`).
+
+import { build } from 'esbuild';
+import { chmod, cp, mkdir, readdir, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const src = path.join(root, 'src');
+const extSrc = path.join(src, 'extension');
+const dist = path.join(root, 'dist');
+const extDist = path.join(dist, 'extension');
+
+const rel = (p) => path.relative(root, p);
+const outputs = [];
+
+await rm(dist, { recursive: true, force: true });
+await mkdir(path.join(dist, 'cli'), { recursive: true });
+await mkdir(path.join(extDist, 'icons'), { recursive: true });
+
+// (a) CLI: single executable ESM bundle for node >= 20.
+const cliOut = path.join(dist, 'cli', 'index.js');
+await build({
+  entryPoints: [path.join(src, 'cli', 'index.ts')],
+  outfile: cliOut,
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  banner: { js: '#!/usr/bin/env node' },
+  logLevel: 'warning',
+});
+await chmod(cliOut, 0o755);
+outputs.push(rel(cliOut));
+
+// (b) Extension scripts. The service worker is declared `type: module` in the
+// manifest, so it may stay ESM; content script and popup must be IIFEs.
+const extEntries = [
+  { entry: 'background.ts', out: 'background.js', format: 'esm' },
+  { entry: 'content.ts', out: 'content.js', format: 'iife' },
+  { entry: path.join('popup', 'popup.ts'), out: 'popup.js', format: 'iife' },
+];
+for (const { entry, out, format } of extEntries) {
+  const outfile = path.join(extDist, out);
+  await build({
+    entryPoints: [path.join(extSrc, entry)],
+    outfile,
+    bundle: true,
+    platform: 'browser',
+    format,
+    target: 'chrome120',
+    logLevel: 'warning',
+  });
+  outputs.push(rel(outfile));
+}
+
+// (c) Static assets, flattened into dist/extension/ (icons keep their folder,
+// matching the paths declared in manifest.json).
+for (const file of ['manifest.json', path.join('popup', 'popup.html'), 'styles.css']) {
+  const dest = path.join(extDist, path.basename(file));
+  await cp(path.join(extSrc, file), dest);
+  outputs.push(rel(dest));
+}
+
+const iconsDir = path.join(extSrc, 'icons');
+const icons = (await readdir(iconsDir).catch(() => [])).filter((f) => f.endsWith('.png')).sort();
+if (icons.length === 0) {
+  console.error('build: no icons in src/extension/icons — run `pnpm build:icons` first');
+  process.exit(1);
+}
+for (const icon of icons) {
+  const dest = path.join(extDist, 'icons', icon);
+  await cp(path.join(iconsDir, icon), dest);
+  outputs.push(rel(dest));
+}
+
+console.log(`build: ${outputs.length} files -> ${outputs.join(', ')}`);

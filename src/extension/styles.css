@@ -1,0 +1,7 @@
+/*
+ * jev-duo content styles.
+ *
+ * Injected on x.com, twitter.com, reddit.com and news.ycombinator.com via
+ * manifest.json `content_scripts[].css`. The fold bar, dimmed and badged
+ * post styles (spec §5.1 ui/fold.ts) land here in later tasks.
+ */
