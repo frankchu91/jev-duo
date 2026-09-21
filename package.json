@@ -1,0 +1,49 @@
+{
+  "name": "jev-duo",
+  "version": "0.1.0",
+  "description": "A two-brain agent that reads your feeds with you: an LLM writes the rules, Jev enforces them at 100ms per post.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frankchu91/jev-duo.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "jev-duo": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "build": "node scripts/build.mjs",
+    "build:icons": "node scripts/make-icons.mjs",
+    "package:ext": "node scripts/package-extension.mjs",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/chrome": "^0.3.0",
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^26.6.2",
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.1.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.1"
+  }
+}
