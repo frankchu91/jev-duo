@@ -28,6 +28,7 @@
     "https://www.reddit.com/*",
     "https://news.ycombinator.com/*",
     "https://openrouter.ai/*",
+    "https://api.typesafe.ai/*",
     "https://api.anthropic.com/*"
   ],
   "content_scripts": [

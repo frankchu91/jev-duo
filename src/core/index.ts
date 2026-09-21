@@ -7,5 +7,8 @@ export * from './policy';
 export * from './hash';
 export * from './json';
 export * from './providers/types';
+export * from './providers/http';
 export * from './providers/jev/mock';
+export * from './providers/jev/typesafe';
+export * from './providers/jev/openrouter';
 export * from './providers/llm/mock';
