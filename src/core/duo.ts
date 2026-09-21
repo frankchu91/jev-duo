@@ -13,14 +13,30 @@ export interface DuoSettings {
 }
 
 export interface DuoStats {
-  judged: number; folded: number; dimmed: number; badged: number; kept: number; keptByRule: number;
-  errors: number; cacheHits: number; arbitrated: number; p50LatencyMs: number; estimatedUsd: number;
-  inputTokens: number; lastSources: VerdictSource[];
+  judged: number;
+  folded: number;
+  dimmed: number;
+  badged: number;
+  kept: number;
+  keptByRule: number;
+  errors: number;
+  cacheHits: number;
+  arbitrated: number;
+  p50LatencyMs: number;
+  estimatedUsd: number;
+  inputTokens: number;
+  lastSources: VerdictSource[];
 }
 
 export interface DuoAgentOptions {
-  jev: JevProvider; llm: LlmProvider; pack?: QuestionPack; settings?: Partial<DuoSettings>;
-  examples?: ExampleStore; cache?: LruCache<Verdict>; arbiter?: Arbiter; now?: () => Date;
+  jev: JevProvider;
+  llm: LlmProvider;
+  pack?: QuestionPack;
+  settings?: Partial<DuoSettings>;
+  examples?: ExampleStore;
+  cache?: LruCache<Verdict>;
+  arbiter?: Arbiter;
+  now?: () => Date;
 }
 
 const LAST_LATENCIES_MAX = 200;
@@ -58,9 +74,16 @@ export class DuoAgent {
   private readonly now: () => Date;
   private readonly usageByItem = new Map<string, number>();
 
-  private judged = 0; private folded = 0; private dimmed = 0; private badged = 0;
-  private kept = 0; private keptByRule = 0; private errors = 0; private cacheHits = 0;
-  private arbitratedCount = 0; private inputTokens = 0;
+  private judged = 0;
+  private folded = 0;
+  private dimmed = 0;
+  private badged = 0;
+  private kept = 0;
+  private keptByRule = 0;
+  private errors = 0;
+  private cacheHits = 0;
+  private arbitratedCount = 0;
+  private inputTokens = 0;
   private readonly jevLatencies: number[] = [];
   private readonly sources: VerdictSource[] = [];
 
@@ -75,22 +98,43 @@ export class DuoAgent {
     this.arbiter = opts.arbiter ?? new Arbiter(this.llm, { now: () => this.now().getTime() });
   }
 
-  get pack(): QuestionPack | undefined { return this._pack; }
-  setPack(pack: QuestionPack): void { this._pack = pack; }
-  get settings(): DuoSettings { return this._settings; }
-  updateSettings(p: Partial<DuoSettings>): void { this._settings = { ...this._settings, ...p }; }
-  get examples(): ExampleStore { return this.exampleStore; }
+  get pack(): QuestionPack | undefined {
+    return this._pack;
+  }
 
+  setPack(pack: QuestionPack): void {
+    this._pack = pack;
+  }
+
+  get settings(): DuoSettings {
+    return { ...this._settings };
+  }
+
+  updateSettings(p: Partial<DuoSettings>): void {
+    this._settings = { ...this._settings, ...p };
+  }
+
+  get examples(): ExampleStore {
+    return this.exampleStore;
+  }
+
+  /** Compiles a fresh pack from `intent` alone — no examples folded in (spec §4.4: only `recompile()`
+   * feeds corrections back into the prompt). */
   async compile(intent: string): Promise<QuestionPack> {
-    const pack = await compilePack(intent, this.llm, { examples: this.exampleStore.list(), now: this.now });
+    return this.runCompile(intent, []);
+  }
+
+  /** Re-compiles the current pack's intent, folding in every example collected since. */
+  async recompile(): Promise<QuestionPack> {
+    if (!this._pack) throw new ProviderError('no pack');
+    return this.runCompile(this._pack.intent, this.exampleStore.list());
+  }
+
+  private async runCompile(intent: string, examples: Example[]): Promise<QuestionPack> {
+    const pack = await compilePack(intent, this.llm, { examples, now: this.now });
     this._pack = pack;
     this.exampleStore.markRecompiled();
     return pack;
-  }
-
-  async recompile(): Promise<QuestionPack> {
-    if (!this._pack) throw new ProviderError('no pack');
-    return this.compile(this._pack.intent);
   }
 
   feedback(ex: Example): { shouldRecompile: boolean } {
@@ -119,28 +163,47 @@ export class DuoAgent {
       this.recordFinal(final);
       onVerdict?.(final, item);
     }
+
+    this.usageByItem.clear(); // drop anything a misbehaving (timed-out/aborted-but-still-resolving) call writes in late
     return verdicts;
   }
 
   stats(): DuoStats {
     return {
-      judged: this.judged, folded: this.folded, dimmed: this.dimmed, badged: this.badged,
-      kept: this.kept, keptByRule: this.keptByRule, errors: this.errors, cacheHits: this.cacheHits,
-      arbitrated: this.arbitratedCount, p50LatencyMs: this.p50(),
+      judged: this.judged,
+      folded: this.folded,
+      dimmed: this.dimmed,
+      badged: this.badged,
+      kept: this.kept,
+      keptByRule: this.keptByRule,
+      errors: this.errors,
+      cacheHits: this.cacheHits,
+      arbitrated: this.arbitratedCount,
+      p50LatencyMs: this.p50(),
       estimatedUsd: (this.inputTokens * JEV_INPUT_USD_PER_MTOK) / 1e6,
-      inputTokens: this.inputTokens, lastSources: [...this.sources],
+      inputTokens: this.inputTokens,
+      lastSources: [...this.sources],
     };
   }
 
   private async resolvePending(item: Item, pack: QuestionPack, v: Verdict): Promise<Verdict> {
     if (!this._settings.arbiter) return { ...v, decision: { kind: 'keep' } };
 
-    const result = await this.arbiter.arbitrate(item, pack, v);
-    if (!result) return { ...v, decision: { kind: 'keep' } }; // no budget (or an invalid reply): fail open
+    const result = await this.tryArbitrate(item, pack, v);
+    if (!result) return { ...v, decision: { kind: 'keep' } }; // no budget, an invalid reply, or a throw: fail open
 
     this.exampleStore.add(result.example);
     this.arbitratedCount += 1;
     return { ...v, decision: result.decision, source: 'arbiter' };
+  }
+
+  /** A throwing arbiter must not reject `judge()` and discard the rest of the batch. */
+  private async tryArbitrate(item: Item, pack: QuestionPack, v: Verdict) {
+    try {
+      return await this.arbiter.arbitrate(item, pack, v);
+    } catch {
+      return null;
+    }
   }
 
   /** Cost/latency/cache-hit accounting for what happened at the Jev layer — called once per item,
@@ -170,9 +233,12 @@ export class DuoAgent {
     else if (d.kind === 'badge') this.badged += 1;
     else if (d.kind === 'keep') {
       this.kept += 1;
-      // reason is set either by a keep-rule match (its label) or by the arbiter ('arbiter'); only
-      // the former is "kept by a rule" — a plain fail-open/default keep has no reason at all.
-      if (d.reason !== undefined && d.reason !== 'arbiter') this.keptByRule += 1;
+      // A keep-rule match is the only source of a "kept by rule": policy.ts sets `reason` to the
+      // rule's label there. The arbiter's own no-hide keep is a different source (`source:'arbiter'`),
+      // and a plain fail-open/default keep has no reason at all — checking the verdict's source
+      // (rather than comparing `reason` against the literal string `'arbiter'`) avoids relying on
+      // that string coincidence.
+      if (v.source !== 'arbiter' && d.reason !== undefined) this.keptByRule += 1;
     }
   }
 

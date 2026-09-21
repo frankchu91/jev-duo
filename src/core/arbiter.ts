@@ -37,16 +37,25 @@ export class Arbiter {
     this.now = opts.now ?? (() => Date.now());
   }
 
-  /** Number of calls still available in the current sliding window. */
+  /** Number of calls still available in the current sliding window. A pure read — it does not prune
+   * `callTimestamps` (pruning happens as a side effect of `arbitrate`, where mutation is already
+   * expected); the count is correct either way since it only ever counts timestamps still in-window. */
   get remaining(): number {
     const cutoff = this.now() - this.windowMs;
+    let inWindow = 0;
+    for (const t of this.callTimestamps) if (t > cutoff) inWindow += 1;
+    return Math.max(0, this.budgetCalls - inWindow);
+  }
+
+  private prune(): void {
+    const cutoff = this.now() - this.windowMs;
     while (this.callTimestamps.length > 0 && this.callTimestamps[0] <= cutoff) this.callTimestamps.shift();
-    return Math.max(0, this.budgetCalls - this.callTimestamps.length);
   }
 
   /** Returns null when out of budget or the verdict is not pending-arbiter. */
   async arbitrate(item: Item, pack: QuestionPack, verdict: Verdict): Promise<{ decision: Decision; example: Example } | null> {
     if (verdict.decision.kind !== 'pending-arbiter') return null;
+    this.prune();
     if (this.remaining <= 0) return null;
     const pending: Pending = verdict.decision;
 

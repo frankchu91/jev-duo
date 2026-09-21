@@ -50,7 +50,49 @@ describe('Evaluator', () => {
 
     const [v] = await evaluator.judge(pack, [item]);
     expect(evaluate).not.toHaveBeenCalled();
+    // The decision is RE-DECIDED at the default strictness on every hit (see the dedicated
+    // live-strictness test below), not just copied through; it happens to match `cachedVerdict`
+    // here because decide(pack, rules, keeps, {strictness: 0.5}) reproduces the same fold for p=0.9.
     expect(v).toEqual({ ...cachedVerdict, source: 'cache' });
+  });
+
+  it('a cache hit re-decides at the CURRENT strictness, so a settings change applies without a fresh Jev call', async () => {
+    const pack = mkPack(); // rage: threshold 0.7, ambiguous [0.45, 0.7)
+    const item = mkItem('strictness-cache');
+    const cache = new LruCache<Verdict>(10);
+    let strictness = 0.5;
+    const evaluate = vi.fn(async (req: JevRequest): Promise<JevResponse> => ({
+      answers: req.questions.map((q) => ({ id: q.id, type: 'noul' as const, p: q.id === 'r_rage' ? 0.55 : 0 })),
+      latencyMs: 1,
+    }));
+    const jev: JevProvider = { name: 'fake', evaluate };
+    const evaluator = new Evaluator(jev, { cache, strictness: () => strictness });
+
+    const [first] = await evaluator.judge(pack, [item]);
+    expect(first.source).toBe('jev');
+    expect(first.decision.kind).toBe('pending-arbiter'); // p=0.55 sits in the ambiguous band at strictness 0.5
+
+    strictness = 1; // lowers rage's effective threshold from 0.7 to 0.5 -> p=0.55 now clears it directly
+    const [second] = await evaluator.judge(pack, [item]);
+    expect(evaluate).toHaveBeenCalledTimes(1); // still just the one call: this was a cache hit
+    expect(second.source).toBe('cache');
+    expect(second.decision).toEqual({ kind: 'fold', ruleId: 'rage', label: 'Rage', p: 0.55 });
+  });
+
+  it('a throwing cache.set() does not turn a good verdict into an error (write is best-effort)', async () => {
+    const pack = mkPack();
+    const item = mkItem('bad-cache-write');
+    const cache = new LruCache<Verdict>(10);
+    vi.spyOn(cache, 'set').mockImplementation(() => {
+      throw new Error('cache write exploded');
+    });
+    const evaluate = vi.fn(async (req: JevRequest): Promise<JevResponse> => ({ answers: zeroAnswers(req), latencyMs: 1 }));
+    const jev: JevProvider = { name: 'fake', evaluate };
+    const evaluator = new Evaluator(jev, { cache });
+
+    const [v] = await evaluator.judge(pack, [item]);
+    expect(v.source).toBe('jev'); // not 'error' — the throwing write must not corrupt the verdict
+    expect(v.decision).toEqual({ kind: 'keep' });
   });
 
   it('on a cache miss, calls the provider with buildState/packQuestions/meta.itemId and an AbortSignal, splits answers, decides, and caches the jev verdict', async () => {

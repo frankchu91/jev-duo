@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Arbiter } from '../../../src/core/arbiter';
-import { AUTO_RECOMPILE_EVERY, DEFAULT_STRICTNESS, JEV_INPUT_USD_PER_MTOK } from '../../../src/core/constants';
+import { AUTO_RECOMPILE_EVERY, DEFAULT_STRICTNESS, JEV_INPUT_USD_PER_MTOK, TIMEOUT_MS } from '../../../src/core/constants';
 import { DuoAgent } from '../../../src/core/duo';
 import { ExampleStore } from '../../../src/core/learner';
 import { createMockJev } from '../../../src/core/providers/jev/mock';
@@ -99,6 +99,27 @@ describe('DuoAgent', () => {
       const agent = new DuoAgent({ jev: createMockJev(), llm: createMockLlm() });
       await expect(agent.recompile()).rejects.toMatchObject({ name: 'ProviderError' });
     });
+
+    it('compile(intent) passes NO examples to the compiler; only recompile() folds in the example list (spec 4.4)', async () => {
+      const calls: Array<{ system: string; user: string }> = [];
+      const llm: LlmProvider = {
+        name: 'fake',
+        async completeJson(system: string, user: string) {
+          calls.push({ system, user });
+          return JSON.stringify({ rules: [{ id: 'a', label: 'A', question: 'This post is a.' }], keeps: [] });
+        },
+      };
+      const agent = new DuoAgent({ jev: createMockJev(), llm });
+      agent.feedback({ item: mkItem('x'), expected: 'hide', actualDecision: { kind: 'keep' }, source: 'user', at: 't' });
+
+      await agent.compile('hide a');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].user).not.toContain('<examples>');
+
+      await agent.recompile();
+      expect(calls).toHaveLength(2);
+      expect(calls[1].user).toContain('<examples>');
+    });
   });
 
   describe('judge()', () => {
@@ -191,6 +212,52 @@ describe('DuoAgent', () => {
       expect(sources).toHaveLength(50);
       expect(sources.every((s) => s === 'jev')).toBe(true);
     });
+
+    it('a provider that resolves after the timeout leaves no stale usage entry to double-count on a later judge', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const pack = mkPack();
+      let settleLate: (() => void) | undefined;
+      let call = 0;
+      const jev: JevProvider = {
+        name: 'fake',
+        evaluate(req) {
+          call += 1;
+          if (call === 1) {
+            // Ignores the abort signal entirely (a misbehaving provider) and resolves only when told to.
+            return new Promise((resolve) => {
+              settleLate = () =>
+                resolve({ answers: req.questions.map((q) => ({ id: q.id, type: 'noul' as const, p: 0.1 })), latencyMs: 1, usage: { inputTokens: 9999 } });
+            });
+          }
+          return Promise.resolve({ answers: req.questions.map((q) => ({ id: q.id, type: 'noul' as const, p: 0.1 })), latencyMs: 1, usage: { inputTokens: 50 } });
+        },
+      };
+      const agent = new DuoAgent({ jev, llm: createMockLlm(), pack });
+      const item = mkItem('flaky'); // same item id both times
+
+      const firstPromise = agent.judge([item]);
+      // judgeOne awaits a real Web Crypto digest (the cache key) before even calling `evaluate` or
+      // arming its internal timeout timer; vi.waitFor polls on the REAL clock (unlike
+      // advanceTimersByTimeAsync, which only fires timers already registered by the time it runs),
+      // so this reliably waits for that real async step to land before the timeout is fast-forwarded.
+      await vi.waitFor(() => {
+        if (call < 1) throw new Error('evaluate not called yet');
+      });
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
+      const [first] = await firstPromise;
+      expect(first.source).toBe('error');
+      expect(agent.stats().inputTokens).toBe(0); // the late write hasn't landed yet, nothing to count
+
+      settleLate?.(); // the abandoned first call finally resolves, well after judge() already returned
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const [second] = await agent.judge([item]); // errors aren't cached: a real 2nd provider call
+      expect(second.source).toBe('jev');
+      expect(agent.stats().inputTokens).toBe(50); // only the 2nd call's real usage, not 50 + 9999
+      vi.useRealTimers();
+    });
   });
 
   describe('judge() arbitration', () => {
@@ -249,6 +316,22 @@ describe('DuoAgent', () => {
       expect(agent.stats().arbitrated).toBe(0);
       expect(agent.stats().kept).toBe(1);
       expect(agent.stats().keptByRule).toBe(0);
+    });
+
+    it('a throwing arbiter is caught and fails open to keep (judge() never rejects because of it)', async () => {
+      const pack = mkPack();
+      const jev = createMockJev({ fixtures: { p: { r_rage: 0.55, r_promo: 0.1, r_spam: 0.1, k_rust: 0.1 } } });
+      const throwingArbiter = {
+        arbitrate: () => {
+          throw new Error('arbiter exploded');
+        },
+      } as unknown as Arbiter;
+      const agent = new DuoAgent({ jev, llm: createMockLlm(), pack, arbiter: throwingArbiter });
+
+      const [v] = await agent.judge([mkItem('p')]);
+      expect(v.decision).toEqual({ kind: 'keep' });
+      expect(v.source).toBe('jev'); // fail-open only replaces the decision, same as the out-of-budget case
+      expect(agent.examples.size).toBe(0);
     });
 
     it('when settings.arbiter is false: a pending verdict becomes keep immediately, without ever calling the llm', async () => {

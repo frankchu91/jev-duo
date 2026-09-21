@@ -89,6 +89,24 @@ describe('Arbiter', () => {
     expect(result?.example).toEqual({ item, expected: 'hide', actualDecision: verdict.decision, source: 'arbiter', at: expect.any(String) });
   });
 
+  it('hide:true with a known ruleId absent from verdict.rules resolves with p=0', async () => {
+    const pack = mkPack();
+    // 'promo' is a real pack rule, but this verdict's `rules` only reports 'rage' — e.g. the
+    // provider omitted an answer for 'promo' entirely.
+    const verdict: Verdict = {
+      itemId: item.id,
+      rules: [{ ruleId: 'rage', p: 0.5 }],
+      keeps: [],
+      decision: { kind: 'pending-arbiter', ruleId: 'rage', p: 0.5 },
+      latencyMs: 5,
+      source: 'jev',
+    };
+    const llm = fakeLlm([JSON.stringify({ hide: true, ruleId: 'promo', why: 'x' })]);
+    const arbiter = new Arbiter(llm);
+    const result = await arbiter.arbitrate(item, pack, verdict);
+    expect(result?.decision).toEqual({ kind: 'dim', ruleId: 'promo', label: 'Promo', p: 0 });
+  });
+
   it('hide:true with an unknown ruleId falls back to the verdict\'s pending ruleId', async () => {
     const pack = mkPack();
     const verdict = pendingVerdict('rage', 0.6);
@@ -161,6 +179,18 @@ describe('Arbiter', () => {
 
     now += 2; // 1001ms after the call -> outside a 1000ms window
     expect(arbiter.remaining).toBe(1);
+  });
+
+  it('a call exactly windowMs old no longer counts (the boundary is <=, not <)', async () => {
+    let now = 1_000_000;
+    const llm = fakeLlm([JSON.stringify({ hide: false, why: 'ok' })]);
+    const arbiter = new Arbiter(llm, { budgetCalls: 1, windowMs: 1000, now: () => now });
+
+    await arbiter.arbitrate(item, mkPack(), pendingVerdict('rage', 0.5));
+    expect(arbiter.remaining).toBe(0);
+
+    now += 1000; // exactly windowMs later
+    expect(arbiter.remaining).toBe(1); // no longer counted
   });
 
   it('a thrown/rejected llm call also returns null and counts against the budget (fail-open)', async () => {

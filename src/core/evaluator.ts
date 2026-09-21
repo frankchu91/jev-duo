@@ -36,6 +36,11 @@ function semaphore(max: number): () => Promise<() => void> {
     });
 }
 
+interface CacheLookup {
+  key: string;
+  cached: Verdict | undefined;
+}
+
 function splitAnswers(answers: JevAnswer[]): { rules: RuleVerdict[]; keeps: RuleVerdict[] } {
   const rules: RuleVerdict[] = [];
   const keeps: RuleVerdict[] = [];
@@ -81,22 +86,36 @@ export class Evaluator {
     return results;
   }
 
-  /** Best-effort cache key: a hashing failure (e.g. no Web Crypto in an insecure context) degrades to
-   * "skip the cache for this item" rather than failing the whole judgment. */
-  private async cacheKey(pack: QuestionPack, item: Item): Promise<string | undefined> {
+  /** Best-effort cache read: a hashing failure (e.g. no Web Crypto in an insecure context) or a
+   * throwing cache implementation degrades to "no cached verdict" rather than failing the whole
+   * judgment — never rejects. */
+  private async tryCacheGet(pack: QuestionPack, item: Item): Promise<CacheLookup | undefined> {
     if (!this.cache) return undefined;
     try {
-      return await verdictKey(pack, item);
+      const key = await verdictKey(pack, item);
+      return { key, cached: this.cache.get(key) };
     } catch {
       return undefined;
     }
   }
 
+  /** Best-effort cache write: a throwing cache must not turn an otherwise-good verdict into an error. */
+  private tryCacheSet(key: string | undefined, verdict: Verdict): void {
+    if (!this.cache || key === undefined) return;
+    try {
+      this.cache.set(key, verdict);
+    } catch {
+      // best effort only; a broken cache implementation must never affect the verdict itself
+    }
+  }
+
   private async judgeOne(pack: QuestionPack, item: Item): Promise<Verdict> {
-    const key = await this.cacheKey(pack, item);
-    if (this.cache && key) {
-      const cached = this.cache.get(key);
-      if (cached) return { ...cached, source: 'cache' };
+    const lookup = await this.tryCacheGet(pack, item);
+    if (lookup?.cached) {
+      // Re-decide at the CURRENT strictness: a cache hit still needs to reflect a settings change
+      // made after the verdict was cached, even though Jev itself isn't called again.
+      const decision = decide(pack, lookup.cached.rules, lookup.cached.keeps, { strictness: this.strictness() });
+      return { ...lookup.cached, decision, source: 'cache' };
     }
 
     const started = Date.now();
@@ -118,7 +137,7 @@ export class Evaluator {
       const { rules, keeps } = splitAnswers(response.answers);
       const decision = decide(pack, rules, keeps, { strictness: this.strictness() });
       const verdict: Verdict = { itemId: item.id, rules, keeps, decision, latencyMs, source: 'jev' };
-      if (this.cache && key) this.cache.set(key, verdict);
+      this.tryCacheSet(lookup?.key, verdict);
       return verdict;
     } catch (err) {
       const latencyMs = Date.now() - started;
