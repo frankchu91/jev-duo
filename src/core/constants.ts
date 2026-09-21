@@ -2,6 +2,7 @@ export const DEFAULT_HIDE_THRESHOLD = 0.7;
 export const DEFAULT_KEEP_THRESHOLD = 0.6;
 export const DEFAULT_AMBIGUOUS_LOW = 0.45;
 export const LABEL_MAX_CHARS = 24;
+export const ID_MAX_CHARS = 40; // mirrors the `Id` slug regex in schema.ts
 export const MAX_TEXT_CHARS = 2000;
 export const CACHE_SIZE = 5000;
 export const CONCURRENCY = 6;

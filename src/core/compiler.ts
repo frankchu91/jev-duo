@@ -1,3 +1,4 @@
+import { ID_MAX_CHARS } from './constants';
 import { extractJson } from './json';
 import { COMPILE_SYSTEM, compileUser } from './prompts';
 import { LlmPackOutputSchema, parsePack, type LlmPackOutput } from './schema';
@@ -23,12 +24,17 @@ function parseReply(text: string): { data: LlmPackOutput } | { error: string } {
   return result.success ? { data: result.data } : { error: describeError(result.error) };
 }
 
-/** Appends `-2`, `-3`, ... to ids already seen in `seen`, so ids stay unique across rules and keeps combined. */
+/** Appends `-2`, `-3`, ... to ids already seen in `seen`, so ids stay unique across rules and keeps
+ * combined. The base is truncated so the suffixed id still fits the schema's 40-character id limit —
+ * an LLM that returns two 40-char ids that collide would otherwise produce a pack that fails
+ * validation (and so a compile that fails) purely because of the suffix. */
 function dedupeIds<T extends { id: string }>(items: T[], seen: Map<string, number>): T[] {
   return items.map((item) => {
     const count = (seen.get(item.id) ?? 0) + 1;
     seen.set(item.id, count);
-    return count === 1 ? item : { ...item, id: `${item.id}-${count}` };
+    if (count === 1) return item;
+    const suffix = `-${count}`;
+    return { ...item, id: `${item.id.slice(0, ID_MAX_CHARS - suffix.length)}${suffix}` };
   });
 }
 
