@@ -97,6 +97,7 @@ test('folds the shilling and ragebait tweets on the x fixture, keeps the Rust on
 
   // 3 folded (two crypto + one ragebait), 1 kept by the Rust keep-rule, 2 plain keeps.
   await expect(page.locator('.jd-bar')).toHaveCount(3);
+  await expect(page.locator('.jd-bar').first()).toBeVisible(); // the bar is the only way back to a folded post
   await expect(page.locator('.jd-folded')).toHaveCount(3);
   expect(await page.locator('.jd-bar').evaluateAll((els) => els.map((e) => e.getAttribute('data-jd-rule')))).toEqual([
     'crypto-shilling',
@@ -132,6 +133,7 @@ test('folds the clickbait post on the reddit fixture and skips the ad', async ()
   await waitForJudged(page, 4); // 4 shreddit-posts; shreddit-ad-post is never judged
 
   await expect(page.locator('.jd-bar')).toHaveCount(1);
+  await expect(page.locator('.jd-bar')).toBeVisible();
   await expect(page.locator('.jd-bar')).toHaveAttribute('data-jd-rule', 'ragebait');
   await expect(page.locator('shreddit-post[id="t3_b1aa44"]')).toBeHidden();
   await expect(page.locator('shreddit-post[id="t3_b1aa33"] .jd-tag')).toHaveText(/kept/);
@@ -146,6 +148,10 @@ test('folds the whole three-row story block on the hn fixture', async () => {
   await waitForJudged(page, 5);
 
   await expect(page.locator('.jd-bar')).toHaveCount(1);
+  // A <div> dropped between two <tr>s is not renderable markup: the HN adapter wraps the bar in a
+  // row of its own, and this is what proves the wrapped bar actually shows up on the page.
+  await expect(page.locator('.jd-bar')).toBeVisible();
+  await expect(page.locator('tr.jd-bar-row')).toHaveCount(1);
   // targets() covers the title row, its subtext row and the spacer, so the whole block disappears.
   await expect(page.locator('.jd-folded')).toHaveCount(3);
   await expect(page.locator('tr[id="41000001"]')).toBeHidden();

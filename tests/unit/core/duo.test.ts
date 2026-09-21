@@ -183,7 +183,9 @@ describe('DuoAgent', () => {
       expect(verdicts.find((v) => v.itemId === 'bad')).toMatchObject({ source: 'error', decision: { kind: 'keep' } });
       expect(agent.stats().errors).toBe(1);
       expect(agent.stats().kept).toBe(2); // both the ok default-keep and the failed-open bad item
-      expect(agent.stats().lastSources).toEqual(['jev', 'error']);
+      // Order-insensitive on purpose: both items are judged concurrently (CONCURRENCY 6), so which of
+      // the two settles first is a race. The sequential-ordering guarantee is pinned by the next test.
+      expect([...agent.stats().lastSources].sort()).toEqual(['error', 'jev']);
     });
 
     it('lastSources orders oldest to newest across separate judge() calls (most recent last)', async () => {
