@@ -25,4 +25,9 @@ export interface Adapter {
   /** The element(s) to fold/dim/badge for this post. Most adapters return `[el]`; HN returns the story
    * row plus its subtext and spacer rows so the whole three-row block folds together. */
   targets(el: Element): Element[];
+  /** Optional: wrap the fold bar in whatever element the site's own markup accepts at that position,
+   * and return the wrapper to insert instead. HN's feed is a `<table>`, where a `<div>` between two
+   * `<tr>`s is not renderable — it returns a `<tr class="jd-bar-row"><td colspan="3">`. Adapters that
+   * fold plain block elements omit this and the bar is inserted as is. */
+  wrapBar?(bar: HTMLElement): HTMLElement;
 }

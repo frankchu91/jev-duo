@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { verdictKey } from '../../../src/core/cache';
 import { AUTO_RECOMPILE_EVERY } from '../../../src/core/constants';
 import type { Example, Item, Verdict } from '../../../src/core/types';
 import { createBackground } from '../../../src/extension/background';
 import type { Response as MessageResponse } from '../../../src/extension/messages';
-import { installChromeStub } from './chrome-stub';
+import { EXTENSION_ORIGIN, installChromeStub, type ChromeStub } from './chrome-stub';
 
 const mkItem = (id: string): Item => ({ id, platform: 'generic', text: `post ${id}` });
 const mkExample = (id: string): Example => ({
@@ -15,9 +15,23 @@ const mkExample = (id: string): Example => ({
   at: '2026-01-01T00:00:00.000Z',
 });
 
+/** The debounce window background.ts coalesces verdict-cache mirror writes over. */
+const VERDICT_FLUSH_MS = 2000;
+
 describe('background', () => {
+  let stub: ChromeStub;
+
+  // Fake timers for the whole file, not just the tests that advance them: a judge now leaves a
+  // pending (debounced) verdict-mirror write behind, and a real one would fire seconds later, inside
+  // a LATER test, writing into that test's freshly installed storage stub. useRealTimers() in
+  // afterEach drops whatever is still queued.
   beforeEach(() => {
-    installChromeStub();
+    vi.useFakeTimers();
+    stub = installChromeStub();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('compile', () => {
@@ -78,7 +92,7 @@ describe('background', () => {
       expect(res.verdicts[0]).toMatchObject({ itemId: 'a', source: 'jev', decision: { kind: 'fold', ruleId: 'spam' } });
     });
 
-    it('persists stats and flushes the verdict cache to chrome.storage.session after judging', async () => {
+    it('persists stats immediately and flushes the verdict cache to chrome.storage.session after the debounce', async () => {
       await chrome.storage.local.set({ settings: { mockFixtures: { a: { r_spam: 0.95 } } } });
       const bg = createBackground();
       await bg.ready;
@@ -88,8 +102,32 @@ describe('background', () => {
       const stats = (await chrome.storage.local.get('stats')).stats as { judged: number } | undefined;
       expect(stats?.judged).toBe(1);
 
+      expect((await chrome.storage.session.get('verdicts')).verdicts).toBeUndefined(); // still pending
+      await vi.advanceTimersByTimeAsync(VERDICT_FLUSH_MS);
+
       const verdicts = (await chrome.storage.session.get('verdicts')).verdicts as Array<[string, unknown]> | undefined;
       expect(verdicts).toHaveLength(1);
+    });
+
+    // Each flush rewrites the WHOLE cache, so one write per judge turned a scroll (a judge every few
+    // hundred ms) into a continuous stream of full-cache writes to chrome.storage.session.
+    it('coalesces two judges inside the debounce window into a single chrome.storage.session write', async () => {
+      await chrome.storage.local.set({ settings: { mockFixtures: { a: { r_spam: 0.95 }, b: { r_spam: 0.1 } } } });
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'compile', intent: 'Hide spam.' });
+
+      const sessionSet = vi.spyOn(chrome.storage.session, 'set');
+      await bg.handle({ type: 'judge', items: [mkItem('a')] });
+      await vi.advanceTimersByTimeAsync(VERDICT_FLUSH_MS / 2); // inside the window: resets the timer
+      await bg.handle({ type: 'judge', items: [mkItem('b')] });
+      expect(sessionSet).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(VERDICT_FLUSH_MS);
+      expect(sessionSet).toHaveBeenCalledTimes(1);
+
+      const verdicts = (await chrome.storage.session.get('verdicts')).verdicts as Array<[string, unknown]> | undefined;
+      expect(verdicts).toHaveLength(2); // one write, but both items' verdicts in it
     });
   });
 
@@ -432,6 +470,7 @@ describe('background', () => {
       if (!first.ok || first.type !== 'judge') throw new Error('expected a judge response');
       expect(first.verdicts[0].source).toBe('jev');
 
+      await vi.advanceTimersByTimeAsync(VERDICT_FLUSH_MS); // let the debounced mirror write land
       const sessionBefore = (await chrome.storage.session.get('verdicts')).verdicts;
       expect(sessionBefore).toHaveLength(1);
 
@@ -458,6 +497,103 @@ describe('background', () => {
       const second = await bg.handle({ type: 'judge', items: [mkItem('a')] });
       if (!second.ok || second.type !== 'judge') throw new Error('expected a judge response');
       expect(second.verdicts[0].source).toBe('cache'); // still cached
+    });
+  });
+
+  describe('isSiteEnabled', () => {
+    it('defaults to enabled for every site when nothing is stored', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      for (const platform of ['x', 'reddit', 'hn'] as const) {
+        expect(await bg.handle({ type: 'isSiteEnabled', platform })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: true });
+      }
+    });
+
+    it('reports the stored per-site toggle, and only that site', async () => {
+      await chrome.storage.local.set({ settings: { enabledSites: { x: false, reddit: true, hn: true } } });
+      const bg = createBackground();
+      await bg.ready;
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'x' })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: false });
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'reddit' })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: true });
+    });
+  });
+
+  // The keys in `Settings` must not be reachable from a page's world. getState carries them, so it is
+  // refused whenever the message came from a tab; everything a content script actually needs still works.
+  describe('content-script isolation', () => {
+    const fromTab = { tab: { id: 1 }, origin: 'https://x.com' };
+
+    it('refuses getState from a tab, but serves it to the popup (no sender)', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      expect(await bg.handle({ type: 'getState' }, fromTab)).toEqual({ ok: false, error: 'getState is not available to content scripts' });
+      expect(await bg.handle({ type: 'getState' })).toMatchObject({ ok: true, type: 'getState' });
+    });
+
+    // The action popup has no tab, but the same page opened in a tab of its own (which is how the
+    // e2e suite reaches it) does — and it is still extension UI, identified by its origin, which
+    // nothing running in a web page can report.
+    it('serves getState to an extension page opened in a tab, identified by its origin', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const fromExtensionTab = { tab: { id: 2 }, origin: EXTENSION_ORIGIN };
+      expect(await bg.handle({ type: 'getState' }, fromExtensionTab)).toMatchObject({ ok: true, type: 'getState' });
+    });
+
+    it('refuses getState from a tab that reports no origin at all', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      expect(await bg.handle({ type: 'getState' }, { tab: { id: 3 } })).toEqual({ ok: false, error: 'getState is not available to content scripts' });
+    });
+
+    it('through the real onMessage listener: getState is refused, isSiteEnabled/judge/feedback are not', async () => {
+      vi.resetModules();
+      await import('../../../src/extension/background'); // registers its listener on the current stub
+      await stub.dispatch({ type: 'compile', intent: 'Hide spam.' }, {}); // a pack, so judge can succeed
+
+      expect(await stub.dispatch({ type: 'getState' }, fromTab)).toEqual({ ok: false, error: 'getState is not available to content scripts' });
+      expect(await stub.dispatch({ type: 'isSiteEnabled', platform: 'x' }, fromTab)).toMatchObject({ ok: true, enabled: true });
+      expect(await stub.dispatch({ type: 'judge', items: [mkItem('a')] }, fromTab)).toMatchObject({ ok: true, type: 'judge' });
+      expect(await stub.dispatch({ type: 'feedback', example: mkExample('e0') }, fromTab)).toMatchObject({ ok: true, type: 'feedback' });
+    });
+  });
+
+  describe('pageSeen (spec §8: "0 posts seen on this page")', () => {
+    it('records the latest report per tab and returns them all from getState', async () => {
+      const bg = createBackground();
+      await bg.ready;
+
+      expect(await bg.handle({ type: 'pageSeen', platform: 'x', seen: 6 }, { tab: { id: 7 } })).toEqual({ ok: true, type: 'pageSeen' });
+      await bg.handle({ type: 'pageSeen', platform: 'hn', seen: 0 }, { tab: { id: 8 } });
+      await bg.handle({ type: 'pageSeen', platform: 'x', seen: 11 }, { tab: { id: 7 } }); // replaces tab 7's earlier report
+
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.pageSeen).toHaveLength(2);
+      expect(state.pageSeen).toContainEqual(expect.objectContaining({ tabId: 7, platform: 'x', seen: 11 }));
+      expect(state.pageSeen).toContainEqual(expect.objectContaining({ tabId: 8, platform: 'hn', seen: 0 }));
+      expect(typeof state.pageSeen[0].at).toBe('string');
+    });
+
+    it('keeps at most 50 tabs, dropping the least recently reporting one', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      for (let tabId = 1; tabId <= 55; tabId++) {
+        await bg.handle({ type: 'pageSeen', platform: 'x', seen: tabId }, { tab: { id: tabId } });
+      }
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.pageSeen).toHaveLength(50);
+      expect(state.pageSeen.map((r) => r.tabId)).toEqual(Array.from({ length: 50 }, (_, i) => i + 6));
+    });
+
+    it('a report with no tab id (not from a content script) is acknowledged and dropped', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      expect(await bg.handle({ type: 'pageSeen', platform: 'x', seen: 3 })).toEqual({ ok: true, type: 'pageSeen' });
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.pageSeen).toEqual([]);
     });
   });
 

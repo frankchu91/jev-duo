@@ -45,7 +45,7 @@ function asSend(fn: (req: Request) => Promise<Response>): typeof send {
   return fn as unknown as typeof send;
 }
 
-function runContentScript(doc: Document, loc: Location, sendFake: (req: Request) => Promise<Response>, opts: { debounceMs?: number; maxBatch?: number } = {}) {
+function runContentScript(doc: Document, loc: Location, sendFake: (req: Request) => Promise<Response>, opts: { debounceMs?: number; maxBatch?: number; seenReportMs?: number } = {}) {
   return startContentScript(doc, loc, { send: asSend(sendFake), ...opts });
 }
 
@@ -214,6 +214,77 @@ describe('startContentScript', () => {
     script.stop();
   });
 
+  // Spec §8: an adapter whose selectors have gone stale finds nothing, and the popup has to be able to
+  // say so. The count is reported per page, not inferred from the judge traffic (which is empty in
+  // exactly that case).
+  it('reports the initial post count to the background as pageSeen', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send);
+
+    expect(calls.filter((c) => c.type === 'pageSeen')).toEqual([{ type: 'pageSeen', platform: 'x', seen: 6 }]);
+    script.stop();
+  });
+
+  it('reports seen:0 on a page whose posts the adapter cannot find at all', async () => {
+    const { loc } = loadDoc('x.html', '?jd-platform=x');
+    const doc = new DOMParser().parseFromString('<html><body><div>not a feed</div></body></html>', 'text/html');
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send);
+
+    expect(calls.filter((c) => c.type === 'pageSeen')).toEqual([{ type: 'pageSeen', platform: 'x', seen: 0 }]);
+    script.stop();
+  });
+
+  it('re-reports (debounced) only when a later scan changes the count', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send, { seenReportMs: 20 });
+    expect(calls.filter((c) => c.type === 'pageSeen')).toHaveLength(1);
+
+    doc.body.appendChild(doc.createComment('a mutation that adds no posts'));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls.filter((c) => c.type === 'pageSeen')).toHaveLength(1); // count unchanged: no second report
+
+    const article = doc.createElement('article');
+    article.setAttribute('data-testid', 'tweet');
+    article.innerHTML = [
+      '<a href="/new_person/status/1700000000000000009"><time datetime="2026-09-21T01:00:00Z">now</time></a>',
+      '<div data-testid="tweetText">One more tweet streamed in.</div>',
+    ].join('');
+    doc.querySelector('[data-testid="primaryColumn"]')!.appendChild(article);
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(calls.filter((c) => c.type === 'pageSeen')).toEqual([
+      { type: 'pageSeen', platform: 'x', seen: 6 },
+      { type: 'pageSeen', platform: 'x', seen: 7 },
+    ]);
+    script.stop();
+  });
+
+  // Two elements can carry the same item id (a quoted or reposted tweet renders twice). The first copy
+  // must still get its verdict; the duplicate is skipped rather than overwriting it and stranding it.
+  it('a duplicate item id never leaves the first copy stuck in the pending state', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const first = doc.querySelector('article[data-testid="tweet"]')!;
+    const clone = first.cloneNode(true) as Element; // same status id => same item id
+    doc.querySelector('[data-testid="primaryColumn"]')!.appendChild(clone);
+
+    const calls: Request[] = [];
+    const send = makeFakeSend((req) => calls.push(req));
+    const script = runContentScript(doc, loc, send);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const judgeCalls = calls.filter((c) => c.type === 'judge');
+    if (judgeCalls[0].type === 'judge') expect(judgeCalls[0].items.map((i) => i.id)).toHaveLength(6); // the duplicate is not queued twice
+    expect(doc.querySelectorAll('[data-jd="pending"]')).toHaveLength(0);
+    expect(doc.querySelectorAll('.jd-bar')).toHaveLength(3); // ...and the first copy still got folded
+    script.stop();
+  });
+
   it('onWrong sends feedback with expected:"show" and the original item', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
     const calls: Request[] = [];
@@ -253,33 +324,36 @@ describe('startContentScript', () => {
 });
 
 describe('boot', () => {
-  function makeGetStateSend(enabledSites: Record<'x' | 'reddit' | 'hn', boolean> | null) {
+  /** `enabled: null` makes the request fail. Anything other than `isSiteEnabled` is rejected, which
+   * is what pins the contract: boot must never ask for `getState` (that response carries the user's
+   * raw API keys, and this code runs in the page's world). */
+  function makeIsSiteEnabledSend(enabled: boolean | null) {
     return vi.fn(async (req: Request): Promise<Response> => {
-      if (req.type !== 'getState') return { ok: false, error: 'unexpected request in boot test' };
-      if (enabledSites === null) return { ok: false, error: 'boom' };
-      return {
-        ok: true,
-        type: 'getState',
-        settings: { providerMode: 'mock', keys: {}, intent: '', strictness: 0.5, arbiter: true, enabledSites },
-        stats: { judged: 0, folded: 0, dimmed: 0, badged: 0, kept: 0, keptByRule: 0, errors: 0, cacheHits: 0, arbitrated: 0, p50LatencyMs: 0, estimatedUsd: 0, inputTokens: 0, lastSources: [] },
-        exampleCount: 0,
-        hasKeys: false,
-        providers: { jev: 'mock', llm: 'mock' },
-      };
+      if (req.type !== 'isSiteEnabled') return { ok: false, error: `unexpected ${req.type} request in boot` };
+      if (enabled === null) return { ok: false, error: 'boom' };
+      return { ok: true, type: 'isSiteEnabled', enabled };
     });
   }
 
-  it('does not call start when getState reports the platform disabled', async () => {
+  it('asks isSiteEnabled (never getState) for the picked adapter\'s platform', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
-    const send = makeGetStateSend({ x: false, reddit: true, hn: true });
+    const send = makeIsSiteEnabledSend(true);
+    await boot({ doc, loc, send: asSend(send), start: vi.fn() });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({ type: 'isSiteEnabled', platform: 'x' });
+  });
+
+  it('does not call start when the platform is disabled', async () => {
+    const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+    const send = makeIsSiteEnabledSend(false);
     const start = vi.fn();
     await boot({ doc, loc, send: asSend(send), start });
     expect(start).not.toHaveBeenCalled();
   });
 
-  it('does not call start when getState fails (fail open by staying inert)', async () => {
+  it('does not call start when the request fails (fail open by staying inert)', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
-    const send = makeGetStateSend(null);
+    const send = makeIsSiteEnabledSend(null);
     const start = vi.fn();
     await boot({ doc, loc, send: asSend(send), start });
     expect(start).not.toHaveBeenCalled();
@@ -287,16 +361,16 @@ describe('boot', () => {
 
   it('calls start exactly once, with the page, when the platform is enabled', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
-    const send = makeGetStateSend({ x: true, reddit: true, hn: true });
+    const send = makeIsSiteEnabledSend(true);
     const start = vi.fn();
     await boot({ doc, loc, send: asSend(send), start });
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(doc, loc, { send: asSend(send) });
   });
 
-  it('is a no-op (never calls getState or start) when the URL matches no adapter', async () => {
+  it('is a no-op (never asks the background anything) when the URL matches no adapter', async () => {
     const { doc } = loadDoc('x.html');
-    const send = makeGetStateSend({ x: true, reddit: true, hn: true });
+    const send = makeIsSiteEnabledSend(true);
     const start = vi.fn();
     await boot({ doc, loc: { href: 'https://example.com/' } as Location, send: asSend(send), start });
     expect(send).not.toHaveBeenCalled();

@@ -9,9 +9,9 @@
 //
 // Concurrency: `chrome.runtime.onMessage` can dispatch several messages before any of them resolve, so
 // two handlers can be mid-flight over the same closure state at once. `judge` runs immediately (never
-// queued — the content script depends on it being fast) but snapshots `agent`/`cache` into locals up
-// front and never re-reads the closure after an `await`, so a concurrent rebuild can't make it persist
-// the wrong instance's stats. setSettings/resetStats/compile/recompile/feedback all mutate shared state
+// queued — the content script depends on it being fast) but snapshots `agent` into a local up front
+// and never re-reads the closure after an `await`, so a concurrent rebuild can't make it persist the
+// wrong instance's stats. setSettings/resetStats/compile/recompile/feedback all mutate shared state
 // (settings, the agent's pack/examples, or the agent instance itself) and are serialised behind a
 // single-flight queue so two of them never interleave; the two that actually replace the agent
 // (setSettings, resetStats) additionally drain every in-flight `judge` first, so a rebuild never
@@ -23,13 +23,40 @@ import { ExampleStore } from '../core/learner';
 import { resolveProviders } from '../core/providers/resolve';
 import type { JevProvider, LlmProvider } from '../core/providers/types';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
-import type { Request, Response, Settings } from './messages';
+import type { PageSeenReport, Request, Response, Sender, Settings, SiteId } from './messages';
 import { loadExamples, loadSettings, loadStats, loadVerdicts, MAX_VERDICTS, saveExamples, saveSettings, saveStats, saveVerdicts } from './storage';
 
 interface Resolved {
   jev: JevProvider;
   llm: LlmProvider;
   hasKeys: boolean;
+}
+
+/** How long a judge waits before mirroring the verdict cache to chrome.storage.session. A scroll
+ * produces a judge every few hundred ms and each flush rewrites the WHOLE cache (up to MAX_VERDICTS
+ * entries), so writing per judge amplifies one batch of 10 posts into one full-cache write. */
+const VERDICT_FLUSH_MS = 2000;
+
+/** Cap on remembered per-tab `pageSeen` reports. Tabs close without telling the service worker, so
+ * this map would otherwise grow for as long as the worker lives. */
+const MAX_PAGE_REPORTS = 50;
+
+/** `chrome-extension://<id>`, the origin every page of this extension reports as `sender.origin` —
+ * the action popup, an options page, popup.html opened in a tab. Undefined only when there is no
+ * usable `chrome.runtime` at all (a bare unit-test stub), which `isPageContext` treats as "unknown,
+ * so assume a page". */
+function extensionOrigin(): string | undefined {
+  if (typeof chrome === 'undefined' || typeof chrome.runtime?.getURL !== 'function') return undefined;
+  return chrome.runtime.getURL('').replace(/\/$/, '');
+}
+
+/** True when the message came from a web page rather than from this extension's own UI. A content
+ * script always reports its host page's `origin`; nothing running in a page can report the
+ * extension's. `tab === undefined` is the action popup / the worker itself. */
+function isPageContext(sender?: Sender): boolean {
+  if (sender?.tab === undefined) return false;
+  const own = extensionOrigin();
+  return own === undefined || sender.origin !== own;
 }
 
 /** Maps Settings.providerMode to a live jev/llm pair. Falls back to mock/mock (hasKeys:false) whenever
@@ -68,12 +95,16 @@ function providersMayHaveChanged(prev: Settings, next: Settings): boolean {
   );
 }
 
-export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { handle(req: Request): Promise<Response>; ready: Promise<void> } {
+export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { handle(req: Request, sender?: Sender): Promise<Response>; ready: Promise<void> } {
   let settings: Settings;
   let agent: DuoAgent;
   let hasKeys = false;
   let providers: { jev: string; llm: string } = { jev: 'mock', llm: 'mock' };
   let cache: LruCache<Verdict>;
+
+  // Latest `pageSeen` report per tab, insertion-ordered oldest -> newest so the cap can drop the
+  // least recently reporting tab. Memory only: a report is meaningless once the worker restarts.
+  const pageSeen = new Map<number, { platform: SiteId; seen: number; at: string }>();
 
   // Tracks every judge() call currently in flight (from just before it starts until its stats/cache
   // are persisted), so a rebuild can wait for the set to drain instead of racing it.
@@ -90,6 +121,31 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       () => undefined,
     );
     return run;
+  }
+
+  // Trailing-edge debounce for the chrome.storage.session verdict mirror: at most one pending flush,
+  // and each new judge pushes it back by VERDICT_FLUSH_MS. The timer always mirrors the CURRENT
+  // `cache`, so a rebuild that replaced it (see handleSetSettings) can only ever make the flush write
+  // less, never resurrect a discarded entry.
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleVerdictFlush(): void {
+    if (flushTimer !== undefined) clearTimeout(flushTimer);
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined;
+      void saveVerdicts(cache.entries()).catch((err: unknown) => {
+        console.error('jev-duo background: verdict flush failed', err);
+      });
+    }, VERDICT_FLUSH_MS);
+  }
+
+  /** Cancels any pending flush and performs it now. Called before anything that replaces or clears
+   * the cache, so the mirror is never left behind a discarded in-memory state. */
+  async function flushVerdictsNow(): Promise<void> {
+    if (flushTimer === undefined) return;
+    clearTimeout(flushTimer);
+    flushTimer = undefined;
+    await saveVerdicts(cache.entries());
   }
 
   /** Waits for every currently-tracked judge() to settle, re-checking until none are left (a new judge
@@ -154,12 +210,12 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
 
   async function handleJudge(items: Item[]): Promise<Response> {
     const current = agent;
-    const currentCache = cache;
     if (!current.pack) return { ok: false, error: 'no pack compiled yet' };
 
     const task = (async (): Promise<Response> => {
       const verdicts = await current.judge(items);
-      await Promise.all([saveStats(current.stats()), saveVerdicts(currentCache.entries())]);
+      await saveStats(current.stats());
+      scheduleVerdictFlush(); // the session mirror is a cache of a cache: coalescing writes is free
       return { ok: true, type: 'judge', verdicts };
     })();
 
@@ -202,6 +258,7 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     const saved = await saveSettings(patch);
 
     await waitForInFlightJudges(); // let any judge still using the OLD agent/cache finish first
+    await flushVerdictsNow(); // ...and land its (debounced) mirror write before the cache can change
 
     if (providersMayHaveChanged(before, saved)) {
       // The verdict cache key carries no provider identity, so a probability cached under the old
@@ -222,7 +279,23 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     return { ok: true, type: 'resetStats' };
   }
 
-  async function dispatch(req: Request): Promise<Response> {
+  /** Records one content script's post count for its tab, dropping the least recently reporting tab
+   * once the cap is reached (delete-then-set keeps insertion order == recency). */
+  function recordPageSeen(tabId: number, platform: SiteId, seen: number): void {
+    pageSeen.delete(tabId);
+    pageSeen.set(tabId, { platform, seen, at: new Date().toISOString() });
+    while (pageSeen.size > MAX_PAGE_REPORTS) {
+      const oldest = pageSeen.keys().next().value;
+      if (oldest === undefined) break;
+      pageSeen.delete(oldest);
+    }
+  }
+
+  function pageSeenReports(): PageSeenReport[] {
+    return [...pageSeen].map(([tabId, report]) => ({ tabId, ...report }));
+  }
+
+  async function dispatch(req: Request, sender?: Sender): Promise<Response> {
     switch (req.type) {
       case 'judge':
         return handleJudge(req.items);
@@ -233,7 +306,15 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       case 'feedback':
         return enqueueMutation(() => handleFeedback(req.example));
       case 'getState':
-        return { ok: true, type: 'getState', settings, stats: agent.stats(), exampleCount: agent.examples.size, hasKeys, providers };
+        return { ok: true, type: 'getState', settings, stats: agent.stats(), exampleCount: agent.examples.size, hasKeys, providers, pageSeen: pageSeenReports() };
+      case 'isSiteEnabled':
+        // The only state a page context may ask for, and deliberately one boolean wide.
+        return { ok: true, type: 'isSiteEnabled', enabled: settings.enabledSites[req.platform] !== false };
+      case 'pageSeen':
+        // No tab id (e.g. driven through the test hook rather than onMessage): nothing to key on, so
+        // the report is acknowledged and dropped rather than failing the content script's send.
+        if (sender?.tab?.id !== undefined) recordPageSeen(sender.tab.id, req.platform, req.seen);
+        return { ok: true, type: 'pageSeen' };
       case 'setSettings':
         return enqueueMutation(() => handleSetSettings(req.patch));
       case 'resetStats':
@@ -243,10 +324,17 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     }
   }
 
-  async function handle(req: Request): Promise<Response> {
+  async function handle(req: Request, sender?: Sender): Promise<Response> {
     try {
+      // Defence in depth for the keys in `Settings`: a content script shares its world with the page.
+      // It never needs getState (it asks `isSiteEnabled`), so the request is refused outright rather
+      // than answered with a redacted copy — a rejection can't be mistaken for real settings by
+      // future code. Refusing is also the fallback when the origin can't be established at all.
+      if (req.type === 'getState' && isPageContext(sender)) {
+        return { ok: false, error: 'getState is not available to content scripts' };
+      }
       await ready;
-      return await dispatch(req);
+      return await dispatch(req, sender);
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -263,9 +351,9 @@ if (typeof chrome !== 'undefined') {
   // Test hook: chrome.runtime.sendMessage never delivers to the sender's own context, so the e2e
   // suite drives the background through this handle instead (tests/e2e/helpers.ts).
   (globalThis as unknown as { __jevDuo?: typeof background }).__jevDuo = background;
-  chrome.runtime.onMessage.addListener((req: Request, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((req: Request, sender, sendResponse) => {
     background
-      .handle(req)
+      .handle(req, sender)
       .catch((err: unknown): Response => ({ ok: false, error: err instanceof Error ? err.message : String(err) }))
       .then(sendResponse);
     return true; // keep the message channel open for the async sendResponse above

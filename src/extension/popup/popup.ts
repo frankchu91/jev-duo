@@ -8,7 +8,7 @@
 
 import type { DuoStats } from '../../core/duo';
 import type { QuestionPack } from '../../core/types';
-import { send, type Response, type Settings } from '../messages';
+import { send, type PageSeenReport, type Response, type Settings } from '../messages';
 
 const DEBOUNCE_MS = 300;
 const STATS_REFRESH_MS = 2000;
@@ -18,9 +18,25 @@ const RULE_GLYPH: Record<string, string> = { fold: '⚡', dim: '◐', badge: '�
 
 const MODEL_PLACEHOLDER: Record<Settings['providerMode'], string> = {
   mock: 'not used in mock mode',
-  openrouter: 'e.g. anthropic/claude-3.5-haiku',
-  typesafe: 'e.g. claude-3-5-haiku-20241022 (optional; needs an Anthropic key)',
+  openrouter: 'e.g. anthropic/claude-opus-5',
+  typesafe: 'e.g. claude-opus-5 (needs an Anthropic key)',
 };
+
+const NO_PAGE_REPORT = 'no page report yet';
+const ZERO_SEEN = "0 posts seen on this page — the site's layout may have changed";
+
+/** The active tab's id, used to pick this window's `pageSeen` report out of getState. `tabs.query`
+ * needs no `tabs` permission for the id alone. Returns undefined outside a real extension popup (the
+ * unit tests' detached document) or if the query fails, which renders as "no page report yet". */
+async function activeTabId(): Promise<number | undefined> {
+  if (typeof chrome === 'undefined' || !chrome.tabs?.query) return undefined;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab?.id;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Every id here is baked into popup.html, so a miss means the two have drifted apart — fail loudly
  * rather than silently no-op on a null element. */
@@ -95,6 +111,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
   const siteRedditEl = $<HTMLInputElement>(doc, 'site-reddit');
   const siteHnEl = $<HTMLInputElement>(doc, 'site-hn');
   const statsEl = $(doc, 'stats');
+  const pageSeenEl = $(doc, 'page-seen');
   const examplesEl = $(doc, 'examples');
   const recompileBtn = $<HTMLButtonElement>(doc, 'recompile');
   const resetBtn = $<HTMLButtonElement>(doc, 'reset-stats');
@@ -136,6 +153,14 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
     examplesEl.textContent = `${exampleCount} corrections`;
   }
 
+  /** Spec §8's "0 posts seen on this page": the content script reports its count per tab, so an
+   * adapter whose selectors have gone stale shows up here as a visible zero instead of silence. */
+  function fillPageSeen(reports: PageSeenReport[], tabId: number | undefined): void {
+    const report = tabId === undefined ? undefined : reports.find((r) => r.tabId === tabId);
+    pageSeenEl.textContent = !report ? NO_PAGE_REPORT : report.seen === 0 ? ZERO_SEEN : `${report.seen} posts seen on ${report.platform}`;
+    pageSeenEl.classList.toggle('error', report?.seen === 0);
+  }
+
   function setCompileStatus(text: string, isError: boolean): void {
     compileStatusEl.textContent = text;
     compileStatusEl.classList.toggle('error', isError);
@@ -156,6 +181,10 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
   // back to their normal stats-only refresh.
   let loadFailed = false;
 
+  // Resolved once below, before the first getState: the active tab cannot change while the popup
+  // that opened over it is open.
+  let tabId: number | undefined;
+
   /** Re-fetches state. Normally refreshes only the read-only displays (stats/examples/brain status) —
    * never the input controls, since a periodic tick or a Reset click must not clobber whatever the
    * user is mid-editing in the intent box or the settings fields — unless the initial load never
@@ -170,6 +199,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
       loadFailed = false;
     }
     fillStats(res.stats, res.exampleCount);
+    fillPageSeen(res.pageSeen, tabId);
     brainStatusEl.textContent = `fast brain: ${res.providers.jev} · slow brain: ${res.providers.llm}`;
   }
 
@@ -232,10 +262,13 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
   siteRedditEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
   siteHnEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
 
+  tabId = await activeTabId();
+
   const initial = await send({ type: 'getState' });
   if (initial.ok && initial.type === 'getState') {
     fillSettings(initial.settings);
     fillStats(initial.stats, initial.exampleCount);
+    fillPageSeen(initial.pageSeen, tabId);
     brainStatusEl.textContent = `fast brain: ${initial.providers.jev} · slow brain: ${initial.providers.llm}`;
   } else {
     // Controls are left exactly as popup.html renders them (nothing here disables anything) — still

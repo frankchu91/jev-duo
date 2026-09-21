@@ -52,7 +52,9 @@ export const hnAdapter: Adapter = {
     const score = scoreText ? parseInt(scoreText, 10) : undefined;
     const author = subtext?.querySelector('a.hnuser')?.textContent?.trim();
 
-    const meta: ItemMeta = { hasLink: !url?.startsWith('item?id='), score, comments: commentsOf(subtext) };
+    // A self post links to its own discussion (`item?id=...`), which is not an outbound link; neither
+    // is a missing href — `!url?.startsWith(...)` used to report `true` for that second case.
+    const meta: ItemMeta = { hasLink: !!url && !url.startsWith('item?id='), score, comments: commentsOf(subtext) };
 
     return { id, platform: 'hn', author, text, url, meta };
   },
@@ -61,5 +63,18 @@ export const hnAdapter: Adapter = {
     const subtext = subtextRowOf(el);
     const spacer = spacerRowOf(subtext);
     return [el, subtext, spacer].filter((x): x is Element => !!x);
+  },
+
+  /** A story row is a `<tr>` inside the front-page table, so the fold bar has to be a row too —
+   * colspan 3 to match the title row's rank / votelinks / title cells. */
+  wrapBar(bar) {
+    const doc = bar.ownerDocument;
+    const row = doc.createElement('tr');
+    row.className = 'jd-bar-row';
+    const cell = doc.createElement('td');
+    cell.colSpan = 3;
+    cell.appendChild(bar);
+    row.appendChild(cell);
+    return row;
   },
 };

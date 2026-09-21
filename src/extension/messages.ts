@@ -29,12 +29,32 @@ export const DEFAULT_SETTINGS: Settings = {
   enabledSites: { x: true, reddit: true, hn: true },
 };
 
+/** The slice of `chrome.runtime.MessageSender` the background actually reads. A message from a tab
+ * whose `origin` is not the extension's own comes from a content script — it shares its world with
+ * the page — which is what gates `getState` below. Both fields are set by the browser, so a page
+ * cannot claim to be something it is not. (An extension page reports the extension origin whether it
+ * runs as the action popup, with no `tab` at all, or opened in a tab of its own.) */
+export interface Sender {
+  tab?: { id?: number };
+  origin?: string;
+}
+
+/** One content script's report of how many posts its adapter found on the page it runs in. */
+export interface PageSeenReport {
+  tabId: number;
+  platform: SiteId;
+  seen: number;
+  at: string;
+}
+
 export type Request =
   | { type: 'judge'; items: Item[] }
   | { type: 'compile'; intent: string }
   | { type: 'recompile' }
   | { type: 'feedback'; example: Example }
   | { type: 'getState' }
+  | { type: 'isSiteEnabled'; platform: SiteId }
+  | { type: 'pageSeen'; platform: SiteId; seen: number }
   | { type: 'setSettings'; patch: Partial<Settings> }
   | { type: 'resetStats' };
 
@@ -42,11 +62,14 @@ export type Response =
   | { ok: true; type: 'judge'; verdicts: Verdict[] }
   | { ok: true; type: 'compile' | 'recompile'; pack: QuestionPack }
   | { ok: true; type: 'feedback'; recompiled: boolean; exampleCount: number }
-  // `settings` includes `keys` (raw API keys) verbatim: the popup is the intended, sole reader of
-  // getState, so only it should ever send this request. Never surface a getState-driven "settings"
-  // view in the content script or any page context. `hasKeys` means "the Jev provider is live";
-  // `providers` gives the resolved provider names (e.g. `{jev:'typesafe', llm:'mock'}`) so the popup
-  // can show when the slow brain in particular has fallen back to mock even though Jev is live.
+  // `settings` includes `keys` (raw API keys) verbatim, so getState is the popup's request and the
+  // popup's alone: background.ts REJECTS it whenever the message came from a tab (a content script)
+  // with `getState is not available to content scripts`, which makes "no keys in a page context" a
+  // structural property rather than a convention. A page that needs to know whether it may run asks
+  // `isSiteEnabled` instead, which answers one boolean and nothing else. `hasKeys` means "the Jev
+  // provider is live"; `providers` gives the resolved provider names (e.g. `{jev:'typesafe',
+  // llm:'mock'}`) so the popup can show when the slow brain in particular has fallen back to mock
+  // even though Jev is live; `pageSeen` is the latest post count each content script reported.
   | {
       ok: true;
       type: 'getState';
@@ -55,7 +78,10 @@ export type Response =
       exampleCount: number;
       hasKeys: boolean;
       providers: { jev: string; llm: string };
+      pageSeen: PageSeenReport[];
     }
+  | { ok: true; type: 'isSiteEnabled'; enabled: boolean }
+  | { ok: true; type: 'pageSeen' }
   | { ok: true; type: 'setSettings' | 'resetStats' }
   | { ok: false; error: string };
 

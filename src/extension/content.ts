@@ -12,6 +12,9 @@ import { applyPending, clearPending, mountDecision } from './ui/fold';
 
 const DEBOUNCE_MS = 150;
 const MAX_BATCH = 10;
+/** Minimum gap between `pageSeen` reports after the initial one. A feed mutates constantly; the popup
+ * only needs to know whether this page is producing posts at all, so one report per second is plenty. */
+const SEEN_REPORT_MS = 1000;
 /** How many times a post may extract to `null` before content.ts gives up on it and marks it seen
  * anyway. Without a cap, a post that will never be judgeable (e.g. a pure-media tweet with no
  * tweetText) gets re-extracted on every single MutationObserver scan for as long as it stays in the
@@ -23,7 +26,7 @@ interface Pending { el: Element; targets: Element[]; item: Item }
 export function startContentScript(
   doc: Document,
   loc: Location,
-  deps: { send: typeof send; debounceMs?: number; maxBatch?: number },
+  deps: { send: typeof send; debounceMs?: number; maxBatch?: number; seenReportMs?: number },
 ): { stop(): void; seen(): number } {
   const picked: Adapter | undefined = pickAdapter(new URL(loc.href));
   if (!picked) return { stop() {}, seen: () => 0 };
@@ -31,12 +34,20 @@ export function startContentScript(
 
   const debounceMs = deps.debounceMs ?? DEBOUNCE_MS;
   const maxBatch = deps.maxBatch ?? MAX_BATCH;
+  const seenReportMs = deps.seenReportMs ?? SEEN_REPORT_MS;
 
-  const seen = new Set<Element>();
+  // A WeakSet plus a counter, not a Set: on an infinite feed the strong Set kept every post element
+  // the user ever scrolled past alive for the life of the tab, even after the site recycled it out of
+  // the DOM. The count is what `seen()` and the popup report need; the elements themselves are only
+  // ever asked "have I handled you before?".
+  const seen = new WeakSet<Element>();
+  let seenCount = 0;
   const nullAttempts = new WeakMap<Element, number>();
   const pendingById = new Map<string, Pending>();
   let batch: string[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let seenTimer: ReturnType<typeof setTimeout> | undefined;
+  let reportedSeen = -1; // -1, not 0, so the very first report goes out even when the page has no posts
   let rafScheduled = false;
   let stopped = false;
 
@@ -58,7 +69,9 @@ export function startContentScript(
       const verdict = res.verdicts.find((v) => v.itemId === id);
       if (!verdict) continue;
       try {
-        mountDecision(p.el, p.targets, p.item, verdict.decision, handlers);
+        // `wrapBar` lets an adapter put the fold bar somewhere its own markup allows (HN's feed is a
+        // <table>, where a bare <div> between rows is not); adapters without one get the bar as is.
+        mountDecision(p.el, p.targets, p.item, verdict.decision, handlers, adapter.wrapBar);
       } catch {
         // a broken mount must not break the page; pending is already cleared above either way.
       }
@@ -78,7 +91,29 @@ export function startContentScript(
     );
   }
 
+  /** Tells the background how many posts this page has produced, so the popup can say "0 posts seen
+   * on this page" when a site's DOM has changed under an adapter (spec §8). Only sends on a change. */
+  function reportSeen(): void {
+    if (seenCount === reportedSeen) return;
+    reportedSeen = seenCount;
+    void deps.send({ type: 'pageSeen', platform: adapter.platform, seen: seenCount });
+  }
+
+  /** Trailing-edge, at most one pending: a feed that streams posts in must not turn into one message
+   * per mutation. The initial report is sent directly by the caller, un-debounced. */
+  function scheduleSeenReport(): void {
+    if (seenTimer !== undefined || stopped) return;
+    seenTimer = setTimeout(() => {
+      seenTimer = undefined;
+      reportSeen();
+    }, seenReportMs);
+  }
+
   function queue(el: Element, targets: Element[], item: Item): void {
+    // Two elements can carry the same item id (X renders a quoted/reposted tweet twice). Keying
+    // `pendingById` by id alone meant the second one overwrote the first, whose targets then kept
+    // their pending marker forever; the duplicate is simply skipped instead, staying fully visible.
+    if (pendingById.has(item.id)) return;
     pendingById.set(item.id, { el, targets, item });
     applyPending(targets);
     batch.push(item.id);
@@ -102,11 +137,12 @@ export function startContentScript(
           // Not judgeable yet: retry on later scans (text may still be rendering) up to the cap, then
           // give up for good — mark it seen so it stops costing a findPosts+extract pass forever.
           const attempts = (nullAttempts.get(el) ?? 0) + 1;
-          if (attempts >= MAX_EXTRACT_ATTEMPTS) seen.add(el);
+          if (attempts >= MAX_EXTRACT_ATTEMPTS) { seen.add(el); seenCount += 1; }
           else nullAttempts.set(el, attempts);
           continue;
         }
         seen.add(el);
+        seenCount += 1;
         queue(el, adapter.targets(el), item);
       } catch {
         // one broken post must not stop the rest of the scan, or be marked seen (so it never recovers)
@@ -119,11 +155,14 @@ export function startContentScript(
     rafScheduled = true;
     requestAnimationFrame(() => {
       rafScheduled = false;
-      if (!stopped) scan();
+      if (stopped) return;
+      scan();
+      scheduleSeenReport();
     });
   }
 
   scan();
+  reportSeen(); // the initial scan's count goes out at once: zero posts is exactly what the popup needs to hear
   const observer = new MutationObserver(() => {
     try {
       scheduleScan();
@@ -144,8 +183,9 @@ export function startContentScript(
       observer.disconnect();
       doc.removeEventListener('visibilitychange', onVisibilityChange);
       if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
+      if (seenTimer !== undefined) { clearTimeout(seenTimer); seenTimer = undefined; }
     },
-    seen: () => seen.size,
+    seen: () => seenCount,
   };
 }
 
@@ -158,13 +198,16 @@ interface BootDeps {
 
 /** Real auto-start's decision logic, factored out so it can be driven by a fake `send` and a spy
  * `start` in tests instead of the real `chrome.runtime`/DOM globals. Checked once at load: a disabled
- * site (or an unreadable one, `getState` failing) is a full no-op, never even reaching `start`. */
+ * site (or an unreadable one, the request failing) is a full no-op, never even reaching `start`.
+ *
+ * Asks `isSiteEnabled`, never `getState`: getState's reply carries the user's raw API keys, and this
+ * code runs in the page's world. The background refuses getState from a tab for the same reason. */
 export async function boot(deps: BootDeps): Promise<void> {
   const adapter = pickAdapter(new URL(deps.loc.href));
   if (!adapter) return;
-  const state = await deps.send({ type: 'getState' });
-  if (!state.ok || state.type !== 'getState') return; // can't confirm enabled: stay out of the way
-  if (state.settings.enabledSites[adapter.platform] === false) return;
+  const res = await deps.send({ type: 'isSiteEnabled', platform: adapter.platform });
+  if (!res.ok || res.type !== 'isSiteEnabled') return; // can't confirm enabled: stay out of the way
+  if (!res.enabled) return;
   deps.start(deps.doc, deps.loc, { send: deps.send });
 }
 

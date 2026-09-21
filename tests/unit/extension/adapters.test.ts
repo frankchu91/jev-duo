@@ -179,6 +179,12 @@ describe('hnAdapter', () => {
     expect(item?.meta?.comments).toBe(62);
   });
 
+  it('reports hasLink:false for a title link with no href at all (not just an item?id= one)', () => {
+    const row = hnAdapter.findPosts(doc)[0].cloneNode(true) as Element;
+    row.querySelector('.titleline > a')!.removeAttribute('href');
+    expect(hnAdapter.extract(row)?.meta?.hasLink).toBe(false);
+  });
+
   it('targets() returns the row plus its subtext row and spacer row', () => {
     const el = hnAdapter.findPosts(doc)[0];
     const targets = hnAdapter.targets(el);

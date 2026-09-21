@@ -7,6 +7,7 @@ import type { Decision, Item } from '../../core/types';
 import type { FoldHandlers } from '../adapters/types';
 
 export type Mounted = { unmount(): void };
+export type WrapBar = (bar: HTMLElement) => HTMLElement;
 
 const PENDING_ATTR = 'data-jd';
 const pct = (p: number): string => `${Math.round(p * 100)}%`;
@@ -26,7 +27,7 @@ export function clearPending(targets: Element[]): void {
 // same union instead correctly picks out that whole member.
 type FoldableDecision = Extract<Decision, { kind: 'fold' | 'dim' | 'badge' }>;
 
-function mountFold(targets: Element[], decision: FoldableDecision, item: Item, handlers: FoldHandlers): Mounted {
+function mountFold(targets: Element[], decision: FoldableDecision, item: Item, handlers: FoldHandlers, wrapBar?: WrapBar): Mounted {
   const first = targets[0];
   for (const t of targets) t.classList.add('jd-folded');
 
@@ -43,7 +44,10 @@ function mountFold(targets: Element[], decision: FoldableDecision, item: Item, h
   wrongBtn.className = 'jd-wrong';
   wrongBtn.textContent = 'Wrong';
   bar.append(label, showBtn, wrongBtn);
-  first?.before(bar);
+  // What actually goes into the page: the bar itself, or the adapter's wrapper around it (HN's table
+  // row). Everything below still talks to `bar`; only insertion and removal use the outer element.
+  const mounted = wrapBar ? wrapBar(bar) : bar;
+  first?.before(mounted);
 
   // Setting textContent both updates the label and drops the (now-detached) buttons in one step.
   function reveal(): void {
@@ -59,7 +63,7 @@ function mountFold(targets: Element[], decision: FoldableDecision, item: Item, h
   return {
     unmount() {
       for (const t of targets) t.classList.remove('jd-folded');
-      bar.remove();
+      mounted.remove(); // the wrapper, when there is one: removing only the bar would leave an empty row
     },
   };
 }
@@ -89,11 +93,13 @@ function mountHideButton(el: Element, item: Item, decision: Decision, handlers: 
 }
 
 /** Renders a final (non-pending) `Decision` for one post. Caller must have already called
- * `clearPending` — this function never touches the pending marker itself. */
-export function mountDecision(el: Element, targets: Element[], item: Item, decision: Decision, handlers: FoldHandlers): Mounted {
+ * `clearPending` — this function never touches the pending marker itself. `wrapBar` comes from the
+ * adapter (see `Adapter.wrapBar`) and only affects the fold bar; tags and the hide button go inside
+ * the post element itself, which is always a valid parent for them. */
+export function mountDecision(el: Element, targets: Element[], item: Item, decision: Decision, handlers: FoldHandlers, wrapBar?: WrapBar): Mounted {
   switch (decision.kind) {
     case 'fold':
-      return mountFold(targets, decision, item, handlers);
+      return mountFold(targets, decision, item, handlers, wrapBar);
     case 'dim':
       return mountTag(el, targets, `◐ ${decision.label} ${pct(decision.p)}`, true);
     case 'badge':

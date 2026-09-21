@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { Decision, Item } from '../../../src/core/types';
+import { hnAdapter } from '../../../src/extension/adapters/hn';
 import type { FoldHandlers } from '../../../src/extension/adapters/types';
 import { applyPending, clearPending, mountDecision } from '../../../src/extension/ui/fold';
+
+const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../e2e/fixtures');
 
 const item: Item = { id: 'x:1', platform: 'x', text: 'hello' };
 
@@ -72,6 +78,56 @@ describe('mountDecision: fold', () => {
     expect(row.classList.contains('jd-folded')).toBe(true);
     expect(sub.classList.contains('jd-folded')).toBe(true);
     expect(spacer.classList.contains('jd-folded')).toBe(true);
+  });
+});
+
+// A bar inserted straight between two <tr>s is not renderable markup: browsers drop a stray <div>
+// inside a table out of the row flow, so on HN the fold bar went missing. The adapter says how to
+// wrap it; fold.ts only has to insert and remove the wrapper rather than the bar.
+describe('mountDecision: fold with an adapter wrapBar (HN fixture)', () => {
+  const decision: Decision = { kind: 'fold', ruleId: 'ragebait', label: 'Ragebait', p: 0.94 };
+
+  function hnStory(): { row: Element; targets: Element[] } {
+    document.body.innerHTML = readFileSync(path.join(FIXTURES, 'hn.html'), 'utf8');
+    const row = hnAdapter.findPosts(document)[0];
+    return { row, targets: hnAdapter.targets(row) };
+  }
+
+  it('inserts the bar as a table row before the story row, not as a bare div', () => {
+    const { row, targets } = hnStory();
+    mountDecision(row, targets, item, decision, noopHandlers(), hnAdapter.wrapBar);
+
+    const barRow = document.body.querySelector('tr.jd-bar-row');
+    expect(barRow).toBeTruthy();
+    expect(barRow?.nextElementSibling).toBe(row);
+    expect(barRow?.parentElement).toBe(row.parentElement); // a sibling row, inside the same table body
+
+    const cell = barRow?.firstElementChild as HTMLTableCellElement;
+    expect(cell.tagName).toBe('TD');
+    expect(cell.colSpan).toBe(3);
+    expect(cell.firstElementChild?.classList.contains('jd-bar')).toBe(true);
+    expect(document.body.querySelector('.jd-bar')?.textContent).toContain('Ragebait');
+  });
+
+  it('Show still reveals the three folded rows through the wrapper', () => {
+    const { row, targets } = hnStory();
+    mountDecision(row, targets, item, decision, noopHandlers(), hnAdapter.wrapBar);
+    expect(targets.filter((t) => t.classList.contains('jd-folded'))).toHaveLength(3);
+
+    document.body.querySelector<HTMLButtonElement>('.jd-show')!.click();
+    expect(targets.some((t) => t.classList.contains('jd-folded'))).toBe(false);
+    expect(document.body.querySelector('tr.jd-bar-row')).toBeTruthy();
+  });
+
+  it('unmount removes the whole wrapper row, leaving no empty <tr> behind', () => {
+    const { row, targets } = hnStory();
+    const rowsBefore = document.body.querySelectorAll('tr').length;
+    const mounted = mountDecision(row, targets, item, decision, noopHandlers(), hnAdapter.wrapBar);
+    mounted.unmount();
+
+    expect(document.body.querySelector('.jd-bar')).toBeNull();
+    expect(document.body.querySelector('tr.jd-bar-row')).toBeNull();
+    expect(document.body.querySelectorAll('tr')).toHaveLength(rowsBefore);
   });
 });
 

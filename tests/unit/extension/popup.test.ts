@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DuoStats } from '../../../src/core/duo';
 import type { QuestionPack } from '../../../src/core/types';
-import type { Request, Response, Settings, send } from '../../../src/extension/messages';
+import type { PageSeenReport, Request, Response, Settings, send } from '../../../src/extension/messages';
 import { initPopup } from '../../../src/extension/popup/popup';
+import { installChromeStub } from './chrome-stub';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HTML = readFileSync(path.resolve(__dirname, '../../../src/extension/popup/popup.html'), 'utf8');
@@ -78,7 +79,7 @@ const STATS: DuoStats = {
   lastSources: ['jev', 'jev', 'cache'],
 };
 
-function getStateResponse(overrides: Partial<Settings> = {}, stats: DuoStats = STATS, exampleCount = 4): Response {
+function getStateResponse(overrides: Partial<Settings> = {}, stats: DuoStats = STATS, exampleCount = 4, pageSeen: PageSeenReport[] = []): Response {
   return {
     ok: true,
     type: 'getState',
@@ -87,8 +88,16 @@ function getStateResponse(overrides: Partial<Settings> = {}, stats: DuoStats = S
     exampleCount,
     hasKeys: false,
     providers: { jev: 'mock', llm: 'mock' },
+    pageSeen,
   };
 }
+
+const report = (tabId: number, seen: number, platform: PageSeenReport['platform'] = 'x'): PageSeenReport => ({
+  tabId,
+  platform,
+  seen,
+  at: '2026-01-01T00:00:00.000Z',
+});
 
 function makeFakeSend(impl: (req: Request) => Response) {
   return vi.fn(async (req: Request): Promise<Response> => impl(req));
@@ -383,6 +392,71 @@ describe('initPopup', () => {
     doc.dispatchEvent(new Event('unload'));
     await vi.advanceTimersByTimeAsync(4000);
     expect(getStateCalls).toBe(3); // no further calls after unload: the interval was cleared
+  });
+
+  // --- Spec §8: "0 posts seen on this page" (the pageSeen report for the popup's own tab) ---
+
+  describe('#page-seen', () => {
+    /** Installs the chrome stub with `tabs.query` answering with `tabId` as the active tab, which is
+     * how the popup picks its own tab's report out of getState. */
+    function withActiveTab(tabId: number): void {
+      installChromeStub().setTabs([{ id: tabId }]);
+    }
+
+    afterEach(() => {
+      delete (globalThis as { chrome?: unknown }).chrome;
+    });
+
+    it('shows the count for the popup\'s own tab, ignoring other tabs\' reports', async () => {
+      withActiveTab(7);
+      const doc = loadDoc();
+      const send = makeFakeSend((req) => (req.type === 'getState' ? getStateResponse({}, STATS, 4, [report(3, 42, 'reddit'), report(7, 6)]) : { ok: false, error: 'unhandled' }));
+      await initPopup(doc, { send: asSend(send) });
+
+      expect(el(doc, 'page-seen').textContent).toBe('6 posts seen on x');
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('spells out a zero count as a possible layout change', async () => {
+      withActiveTab(7);
+      const doc = loadDoc();
+      const send = makeFakeSend((req) => (req.type === 'getState' ? getStateResponse({}, STATS, 4, [report(7, 0, 'hn')]) : { ok: false, error: 'unhandled' }));
+      await initPopup(doc, { send: asSend(send) });
+
+      expect(el(doc, 'page-seen').textContent).toBe("0 posts seen on this page — the site's layout may have changed");
+      expect(el(doc, 'page-seen').classList.contains('error')).toBe(true);
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('says so when this tab has not reported (no content script running there)', async () => {
+      withActiveTab(9);
+      const doc = loadDoc();
+      const send = makeFakeSend((req) => (req.type === 'getState' ? getStateResponse({}, STATS, 4, [report(7, 6)]) : { ok: false, error: 'unhandled' }));
+      await initPopup(doc, { send: asSend(send) });
+
+      expect(el(doc, 'page-seen').textContent).toBe('no page report yet');
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('updates on the next refresh tick when the page starts producing posts', async () => {
+      withActiveTab(7);
+      vi.useFakeTimers();
+      const doc = loadDoc();
+      let calls = 0;
+      const send = makeFakeSend((req) => {
+        if (req.type !== 'getState') return { ok: false, error: 'unhandled' };
+        calls += 1;
+        return getStateResponse({}, STATS, 4, [report(7, calls === 1 ? 0 : 12)]);
+      });
+      await initPopup(doc, { send: asSend(send) });
+      expect(el(doc, 'page-seen').textContent).toContain('0 posts seen');
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(el(doc, 'page-seen').textContent).toBe('12 posts seen on x');
+      expect(el(doc, 'page-seen').classList.contains('error')).toBe(false);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
   });
 
   // --- Fix round 1: submit re-entrancy guard (Compile/Recompile/Reset) ---
