@@ -2,9 +2,9 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pickAdapter } from '../../../src/extension/adapters/index';
-import { genericAdapter } from '../../../src/extension/adapters/generic';
+import { __generic, genericAdapter } from '../../../src/extension/adapters/generic';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.resolve(__dirname, '../../e2e/fixtures');
@@ -19,6 +19,16 @@ function parse(html: string): Document {
 }
 
 describe('genericAdapter', () => {
+  // `__generic` is the fix-round-2 test hook (clock override + cache reset) for the full-scan throttle;
+  // every test starts from a clean cache and the real clock, regardless of what an earlier test did.
+  beforeEach(() => {
+    __generic.reset();
+  });
+  afterEach(() => {
+    __generic.now = () => Date.now();
+    vi.restoreAllMocks();
+  });
+
   it('matches every URL (pickAdapter is what keeps it off the built-in hosts)', () => {
     expect(genericAdapter.matches(new URL('https://anything.example/'))).toBe(true);
   });
@@ -84,6 +94,47 @@ describe('genericAdapter', () => {
       expect(text).not.toContain('color: red');
       expect(text).not.toContain('SECRET_HIDDEN_MARKER');
       expect(text).toContain('Some genuinely visible lead-in text');
+    });
+
+    // Fix round 2, MINOR 2: HIDDEN_STYLE needs a word boundary after none/hidden, or "display:nonesuch"
+    // and "visibility:hiddenpopup" (neither of which actually hides anything) would be treated as
+    // hidden too. `!important` must still match — the boundary sits right after "none"/"hidden" either way.
+    it('HIDDEN_STYLE requires a word boundary: nonesuch/hiddenpopup are not hidden, none/hidden (incl. !important) are', () => {
+      const doc = parse(`
+        <article class="post">
+          Visible lead text that is long enough to clear the qualification minimum on its own already.
+          <span style="display:none">HIDDEN_A</span>
+          <span style="display: none !important">HIDDEN_B</span>
+          <span style="visibility:hidden">HIDDEN_C</span>
+          <span style="display:nonesuch">VISIBLE_D</span>
+          <span style="visibility:hiddenpopup">VISIBLE_E</span>
+        </article>
+      `);
+      const text = genericAdapter.extract(doc.querySelector('.post')!)?.text ?? '';
+      expect(text).not.toContain('HIDDEN_A');
+      expect(text).not.toContain('HIDDEN_B');
+      expect(text).not.toContain('HIDDEN_C');
+      expect(text).toContain('VISIBLE_D');
+      expect(text).toContain('VISIBLE_E');
+    });
+
+    // Fix round 2, MINOR 1: visibleText is an iterative walk (explicit stack), not recursive, so it
+    // must not throw (stack overflow) on an unusually deep chain of wrapper elements.
+    it('visibleText walks a 5,000-deep nested <div> chain iteratively without throwing, and returns its leaf text', () => {
+      const doc = parse('<article class="post" id="root"></article>');
+      let el = doc.getElementById('root')!;
+      for (let i = 0; i < 5000; i++) {
+        const child = doc.createElement('div');
+        el.appendChild(child);
+        el = child;
+      }
+      el.textContent = 'Deep leaf text that is definitely long enough to clear the forty character minimum here.';
+      const root = doc.getElementById('root')!;
+      let text = '';
+      expect(() => {
+        text = genericAdapter.extract(root)?.text ?? '';
+      }).not.toThrow();
+      expect(text).toContain('Deep leaf text');
     });
   });
 
@@ -202,9 +253,9 @@ describe('genericAdapter', () => {
     }
     expect(genericAdapter.findPosts(doc)).toHaveLength(12);
 
-    // A competing group of 7 elsewhere: findPosts reconsiders it (a full scan runs every call once a
-    // cache exists), but 7 is fewer than double the cached, still-healthy, still-attached 12 (needs
-    // >= 24), so it doesn't displace .timeline.
+    // A competing group of 7 elsewhere: irrelevant either way here, since the cheap per-parent recount
+    // (not a full scan — see the throttle tests below) already reflects .timeline's own current 12
+    // members correctly, and 7 wouldn't have displaced them even if a full scan did run (needs >= 24).
     const aside = doc.createElement('div');
     aside.className = 'sidebar';
     doc.body.appendChild(aside);
@@ -219,8 +270,12 @@ describe('genericAdapter', () => {
 
   // Fix round 1, IMPORTANT #2 (spec §3.5, ruling): while the cached parent is still attached and still
   // qualifies on its own, a DIFFERENT group elsewhere only displaces it at >= 2x its member count.
+  // Fix round 2: this now needs the throttled full scan to actually run (see "full-scan throttle"
+  // below), so the clock is forced past FULL_SCAN_MIN_INTERVAL_MS before each check that depends on it.
   it('a different competing group only displaces a healthy, still-attached cached group at >= 2x its size', () => {
     const doc = loadDoc('generic.html');
+    let clock = 1_000_000;
+    __generic.now = () => clock;
     expect(genericAdapter.findPosts(doc)).toHaveLength(6); // warms the cache: .timeline, count 6
 
     const promo = doc.createElement('div');
@@ -234,12 +289,14 @@ describe('genericAdapter', () => {
     };
     for (let i = 0; i < 7; i++) addCard(i);
 
+    clock += 5000; // force the throttled full scan to run on the very next call
     // 7 < 2 x 6 (needs >= 12): the cached, still fully-attached .timeline group is not displaced.
     const stillOld = genericAdapter.findPosts(doc);
     expect(stillOld).toHaveLength(6);
     expect(stillOld.every((el) => el.classList.contains('status'))).toBe(true);
 
     for (let i = 7; i < 12; i++) addCard(i); // grows the competing group to 12 == 2 x 6
+    clock += 5000; // force another full scan
 
     // 12 >= 2 x 6: the competing group now displaces the cached one.
     const displaced = genericAdapter.findPosts(doc);
@@ -248,8 +305,10 @@ describe('genericAdapter', () => {
   });
 
   // Fix round 1, IMPORTANT #2 (spec §3.5, ruling): once the cached parent is detached (the old feed is
-  // gone), the next qualifying group found anywhere is adopted regardless of size — no 2x gate.
-  it('adopts the next qualifying group regardless of size once the cached parent is detached', () => {
+  // gone), the next qualifying group found anywhere is adopted regardless of size — no 2x gate. Fix
+  // round 2: also proves this happens as an IMMEDIATE full scan, not throttled — the spy call count is
+  // checked right after the warm-up, well inside the 20-call/5000ms throttle window.
+  it('a detached parent triggers a full scan immediately regardless of the throttle counter, and adopts the next group regardless of size', () => {
     const doc = loadDoc('generic.html');
     expect(genericAdapter.findPosts(doc)).toHaveLength(6); // warms the cache: .timeline, count 6
 
@@ -265,10 +324,41 @@ describe('genericAdapter', () => {
       list.appendChild(li);
     }
 
+    const spy = vi.spyOn(doc, 'querySelectorAll');
+    // Only 1 call since the warm-up — nowhere near the 20-call/5000ms throttle — yet the detach forces
+    // an immediate full scan: the throttle only ever applies to a still-attached, still-healthy parent.
+    const posts = genericAdapter.findPosts(doc);
+    expect(spy).toHaveBeenCalledTimes(1);
     // Only 4 members — well under 2 x 6 (would need >= 12) — but the old parent is gone, so the
     // replacement gate doesn't apply at all.
-    const posts = genericAdapter.findPosts(doc);
     expect(posts).toHaveLength(4);
     expect(posts.every((el) => el.classList.contains('thread'))).toBe(true);
+  });
+
+  // Fix round 2, IMPORTANT (new): the full-scan throttle itself (spec §3.5).
+  describe('full-scan throttle', () => {
+    it('19 consecutive calls on a healthy, attached cached parent skip the full scan; the 20th runs it', () => {
+      const doc = loadDoc('generic.html');
+      expect(genericAdapter.findPosts(doc)).toHaveLength(6); // call 0 (warm-up): a full scan, cache set
+
+      const spy = vi.spyOn(doc, 'querySelectorAll');
+      for (let i = 0; i < 19; i++) genericAdapter.findPosts(doc);
+      expect(spy).not.toHaveBeenCalled();
+
+      genericAdapter.findPosts(doc); // the 20th call since the warm-up
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('advancing the injected clock by >= 5000ms triggers a full scan on the very next call', () => {
+      const doc = loadDoc('generic.html');
+      let clock = 1_000_000;
+      __generic.now = () => clock;
+      expect(genericAdapter.findPosts(doc)).toHaveLength(6); // warm-up: lastFullScanAt = 1_000_000
+
+      const spy = vi.spyOn(doc, 'querySelectorAll');
+      clock += 5000; // >= FULL_SCAN_MIN_INTERVAL_MS since the warm-up's full scan
+      genericAdapter.findPosts(doc);
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
   });
 });

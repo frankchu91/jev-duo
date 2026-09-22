@@ -14,7 +14,14 @@ const TEXT_MAX = 2000;
 const LANDMARKS = 'nav, header, footer, aside, form';
 const AUTHOR_SELECTORS = ['[rel="author"]', 'a[href*="/@"]', '[class*="author" i]', '[data-author]'];
 const SKIPPED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
-const HIDDEN_STYLE = /display\s*:\s*none|visibility\s*:\s*hidden/i;
+// `\b` after none/hidden rejects "display:nonesuch"/"visibility:hiddenpopup" while still matching
+// "display: none !important" (a boundary sits between "e" and " "/end-of-string either way).
+const HIDDEN_STYLE = /display\s*:\s*none\b|visibility\s*:\s*hidden\b/i;
+// Full-scan throttle (spec §3.5): once the cached parent is attached and healthy, a full document scan
+// (the only way to discover a DIFFERENT, competing group) runs at most this often; every call in between
+// returns the cheap per-parent recount instead.
+const FULL_SCAN_EVERY_CALLS = 20;
+const FULL_SCAN_MIN_INTERVAL_MS = 5000;
 
 function isHidden(el: Element): boolean {
   return (
@@ -25,18 +32,30 @@ function isHidden(el: Element): boolean {
   );
 }
 
-// Visible text (spec §3.2): `el`'s text minus script/style/noscript/template subtrees and minus any
-// hidden/aria-hidden/inline-hidden element's subtree. jsdom has no layout, so this is a structural
-// approximation, not real computed visibility. Every reader of text — qualification, the median/
-// tie-break in `scan`, and `extract`'s `text` field — goes through `collapsedText` below.
-function visibleText(node: Element): string {
-  if (isHidden(node)) return '';
-  let text = '';
-  for (const child of node.childNodes) {
-    if (child.nodeType === Node.TEXT_NODE) text += child.textContent ?? '';
-    else if (child.nodeType === Node.ELEMENT_NODE) text += visibleText(child as Element);
+// Visible text (spec §3.2): `root`'s text minus script/style/noscript/template subtrees and minus any
+// hidden/aria-hidden/inline-hidden element's subtree. Iterative (an explicit stack of {nodes, i} frames,
+// not recursion) so an unusually deep chain of wrapper elements can't blow the call stack; each frame
+// resumes exactly where it left off once the child it just pushed is fully drained, which visits nodes
+// in the same document order recursion would. jsdom has no layout, so this is structural, not real
+// computed visibility. Every reader of text — qualification, the median/tie-break in `scan`, and
+// `extract`'s `text` field — goes through `collapsedText` below.
+function visibleText(root: Element): string {
+  if (isHidden(root)) return '';
+  const parts: string[] = [];
+  const stack: Array<{ nodes: NodeListOf<ChildNode>; i: number }> = [{ nodes: root.childNodes, i: 0 }];
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    if (frame.i >= frame.nodes.length) {
+      stack.pop();
+      continue;
+    }
+    const child = frame.nodes[frame.i++];
+    if (child.nodeType === Node.TEXT_NODE) parts.push(child.textContent ?? '');
+    else if (child.nodeType === Node.ELEMENT_NODE && !isHidden(child as Element)) {
+      stack.push({ nodes: (child as Element).childNodes, i: 0 });
+    }
   }
-  return text;
+  return parts.join('');
 }
 
 function collapsedText(el: Element): string {
@@ -116,10 +135,23 @@ function authorElementOf(el: Element): Element | undefined {
   }
   return undefined;
 }
-let cache: { parent: Element; signature: string; count: number } | undefined;
 
-// Caches `found` as the current group (or clears the cache when nothing qualifies) and returns its
-// outermost members — the shared tail of every "adopt regardless of size" path in `findPosts` below.
+let cache: { parent: Element; signature: string; count: number } | undefined;
+let callsSinceFullScan = 0;
+let lastFullScanAt = 0;
+
+/** Test hook: an overridable clock (production always uses Date.now()) and a way to clear the module's
+ * cache/throttle state between tests, so the full-scan throttle can be driven deterministically instead
+ * of waiting on real wall-clock time. Not read or written by content.ts or any production code path. */
+export const __generic = {
+  now: (): number => Date.now(),
+  reset(): void {
+    cache = undefined;
+    callsSinceFullScan = 0;
+    lastFullScanAt = 0;
+  },
+};
+
 function adopt(found: Group | undefined): Element[] {
   if (!found) {
     cache = undefined;
@@ -129,22 +161,38 @@ function adopt(found: Group | undefined): Element[] {
   return outermost(found.members);
 }
 
+// A full scan is the only way to discover a group other than the cached one; every call site that
+// performs one funnels through here so the throttle's counters always reset together.
+function fullScan(root: ParentNode): Group | undefined {
+  callsSinceFullScan = 0;
+  lastFullScanAt = __generic.now();
+  return scan(root);
+}
+
 export const genericAdapter: Adapter = {
   platform: 'generic',
   matches: () => true,
   findPosts(root) {
-    const found = scan(root);
-    if (!cache) return adopt(found);
+    if (!cache) return adopt(fullScan(root));
 
     const attached = contains(root, cache.parent);
     const own = attached ? qualifying(siblingsOf(cache.parent, cache.signature)) : [];
     // The cached group is a baseline worth protecting only while it's both attached and still qualifies
-    // on its own (spec §3.5); once it's gone (removed from the document) or has thinned below
-    // MIN_SIBLINGS, the next qualifying group found anywhere is adopted regardless of size.
-    if (!attached || own.length < MIN_SIBLINGS) return adopt(found);
+    // on its own (spec §3.5); once it's gone or has thinned below MIN_SIBLINGS, a full scan runs right
+    // away (no throttle) and the next qualifying group found anywhere is adopted regardless of size.
+    if (!attached || own.length < MIN_SIBLINGS) return adopt(fullScan(root));
 
-    // A healthy cached group is displaced only by a DIFFERENT group at least twice its size, to avoid
-    // flapping between two similarly-sized candidates.
+    // Healthy and attached: the cheap recount above already reflects this parent's current children, so
+    // a full scan is only needed often enough to catch a dramatically larger competing group elsewhere.
+    callsSinceFullScan += 1;
+    const due = callsSinceFullScan >= FULL_SCAN_EVERY_CALLS || __generic.now() - lastFullScanAt >= FULL_SCAN_MIN_INTERVAL_MS;
+    if (!due) {
+      cache.count = own.length;
+      return outermost(own);
+    }
+
+    // A DIFFERENT group at least twice the cached size displaces it, to avoid flapping.
+    const found = fullScan(root);
     if (found && (found.parent !== cache.parent || found.signature !== cache.signature) && found.members.length >= cache.count * 2) {
       return adopt(found);
     }

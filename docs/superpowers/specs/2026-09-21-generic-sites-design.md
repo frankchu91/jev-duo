@@ -53,7 +53,11 @@ safe).
    `MIN_SIBLINGS` qualifying children of its own, and only when the new
    group has at least twice as many members, to avoid flapping; once the
    cached parent is detached (or no longer qualifies on its own), the next
-   qualifying group found anywhere is adopted regardless of size.
+   qualifying group found anywhere is adopted regardless of size. While the
+   cached parent stays attached and healthy, the (comparatively expensive)
+   full scan that a replacement check needs is itself throttled to at most
+   once every 20 calls or 5 seconds, whichever comes first — every call in
+   between is the cheap per-parent recount.
 
 **Extraction (`extract`)**: `text` = the element's text with whitespace
 collapsed, capped at 2000 chars; `null` when shorter than `MIN_TEXT`.
