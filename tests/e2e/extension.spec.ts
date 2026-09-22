@@ -289,6 +289,43 @@ test('popup: This site shows the fixture origin as enabled', async () => {
   await page.close();
 });
 
+// The unit suite drives enableSite/disableSite against a chrome stub, which is a description of
+// chrome.scripting rather than the thing itself. This runs the same two handlers against REAL Chrome:
+// the registration it creates, the second injection it causes on a page the static manifest already
+// matches, and the unregistration that takes it away.
+test('generic: enableSite really registers a dynamic content script, and disableSite removes it', async () => {
+  const registrationId = `jd-${fnv1a(FIXTURE_ORIGIN)}`;
+
+  // No permission prompt: the patched manifest already declares the fixture origin as a REQUIRED host
+  // permission (helpers.ts's patchExtension), which is what the popup's prompt would have granted.
+  expect(await enableSite(ext, FIXTURE_ORIGIN)).toEqual([FIXTURE_ORIGIN]);
+
+  const registered = await registeredContentScripts(ext);
+  const ours = registered.find((s) => s.id === registrationId);
+  expect(ours, `expected a dynamic registration with id ${registrationId}, got ${JSON.stringify(registered)}`).toBeTruthy();
+  expect(ours?.matches).toEqual([`${FIXTURE_ORIGIN}/*`]);
+  expect(ours?.js).toEqual(['content.js']);
+
+  // The fixture origin is now matched TWICE — by the manifest's static content_scripts entry and by
+  // the registration above — so Chrome injects content.js into this page twice. The start-once guard
+  // (globalThis.__jevDuoStarted) is what keeps that from producing a second observer, a second scan
+  // and a second set of fold bars: exactly 3, the same count as the single-injection run above.
+  const page = await ext.context.newPage();
+  await page.goto(GENERIC_URL);
+  await waitForJudged(page, 6);
+  await expect(page.locator('.jd-bar')).toHaveCount(3);
+  await expect(page.locator('.jd-folded')).toHaveCount(3);
+  await expect(page.locator('[data-jd-id]')).toHaveCount(6); // not 12: the second injection did nothing
+  await page.close();
+
+  // disableSite also asks Chrome to release the host permission, which HERE it refuses — verified
+  // against real Chrome: `permissions.remove` on an origin the manifest declares as required rejects
+  // with "You cannot remove required permissions." and the permission stays. sites.ts swallows that,
+  // which is why the disable still succeeds and the registration below is really gone.
+  expect(await disableSite(ext, FIXTURE_ORIGIN)).toEqual([]);
+  expect((await registeredContentScripts(ext)).map((s) => s.id)).not.toContain(registrationId);
+});
+
 test('judges the live Hacker News front page', { tag: '@live' }, async () => {
   test.skip(!LIVE, 'set LIVE=1 to run tests that need the public internet');
 
