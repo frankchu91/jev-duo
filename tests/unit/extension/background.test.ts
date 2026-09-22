@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { verdictKey } from '../../../src/core/cache';
 import { AUTO_RECOMPILE_EVERY } from '../../../src/core/constants';
+import { fnv1a } from '../../../src/core/hash';
 import type { Example, Item, Verdict } from '../../../src/core/types';
 import { createBackground } from '../../../src/extension/background';
 import type { Response as MessageResponse } from '../../../src/extension/messages';
@@ -552,6 +553,10 @@ describe('background', () => {
 
     it('generic: true only for an origin exactly present in settings.genericSites', async () => {
       await chrome.storage.local.set({ settings: { genericSites: ['https://mastodon.social'] } });
+      // Task 2's startup reconciliation (design §4) drops a stored origin whose permission isn't
+      // actually held, so this scenario needs a granted permission to reach the case under test here
+      // (settings membership) rather than the permission-drop case (covered separately below).
+      await chrome.permissions.request({ origins: ['https://mastodon.social/*'] });
       const bg = createBackground();
       await bg.ready;
       expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin: 'https://mastodon.social' })).toEqual({
@@ -566,6 +571,192 @@ describe('background', () => {
       });
       // The built-ins are unaffected by genericSites.
       expect(await bg.handle({ type: 'isSiteEnabled', platform: 'x' })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: true });
+    });
+  });
+
+  describe('site management: enableSite / disableSite / reconcile (design §4)', () => {
+    const origin = 'https://mastodon.social';
+    const id = () => `jd-${fnv1a(origin)}`;
+    const expectedSpec = () => ({
+      id: id(),
+      matches: [`${origin}/*`],
+      js: ['content.js'],
+      css: ['styles.css'],
+      runAt: 'document_idle',
+      persistAcrossSessions: true,
+    });
+
+    describe('enableSite', () => {
+      it('registers a dynamic content script with the exact spec shape and adds the origin to settings', async () => {
+        const bg = createBackground();
+        await bg.ready;
+
+        const res = await bg.handle({ type: 'enableSite', origin });
+        expect(res).toEqual({ ok: true, type: 'enableSite', genericSites: [origin] });
+
+        const scripts = await chrome.scripting.getRegisteredContentScripts({ ids: [id()] });
+        expect(scripts).toEqual([expectedSpec()]);
+
+        const stored = await chrome.storage.local.get('settings');
+        expect((stored.settings as { genericSites: string[] }).genericSites).toEqual([origin]);
+      });
+
+      it('is idempotent: enabling the same origin twice updates rather than double-registering', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        await bg.handle({ type: 'enableSite', origin });
+
+        const registerSpy = vi.spyOn(chrome.scripting, 'registerContentScripts');
+        const res = await bg.handle({ type: 'enableSite', origin });
+        expect(res).toEqual({ ok: true, type: 'enableSite', genericSites: [origin] });
+        expect(registerSpy).not.toHaveBeenCalled(); // the second call goes through updateContentScripts
+
+        expect(await chrome.scripting.getRegisteredContentScripts()).toHaveLength(1);
+      });
+
+      it('keeps settings.genericSites sorted and deduplicated across origins', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        await bg.handle({ type: 'enableSite', origin: 'https://z.example' });
+        const res = await bg.handle({ type: 'enableSite', origin: 'https://a.example' });
+        expect(res).toEqual({ ok: true, type: 'enableSite', genericSites: ['https://a.example', 'https://z.example'] });
+      });
+    });
+
+    describe('disableSite', () => {
+      it('unregisters the script, removes the origin from settings, and calls permissions.remove', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        await bg.handle({ type: 'enableSite', origin });
+
+        const removeSpy = vi.spyOn(chrome.permissions, 'remove');
+        const res = await bg.handle({ type: 'disableSite', origin });
+        expect(res).toEqual({ ok: true, type: 'disableSite', genericSites: [] });
+        expect(removeSpy).toHaveBeenCalledWith({ origins: [`${origin}/*`] });
+
+        expect(await chrome.scripting.getRegisteredContentScripts({ ids: [id()] })).toEqual([]);
+        const stored = await chrome.storage.local.get('settings');
+        expect((stored.settings as { genericSites: string[] }).genericSites).toEqual([]);
+      });
+
+      it('tolerates chrome.permissions.remove rejecting', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        await bg.handle({ type: 'enableSite', origin });
+        vi.spyOn(chrome.permissions, 'remove').mockRejectedValue(new Error('nope'));
+
+        const res = await bg.handle({ type: 'disableSite', origin });
+        expect(res).toEqual({ ok: true, type: 'disableSite', genericSites: [] }); // still succeeds
+      });
+    });
+
+    describe('startup reconciliation (init)', () => {
+      it('drops a stored origin whose permission is no longer held', async () => {
+        await chrome.storage.local.set({ settings: { genericSites: [origin] } });
+        const bg = createBackground();
+        await bg.ready;
+
+        const state = await bg.handle({ type: 'getState' });
+        if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+        expect(state.settings.genericSites).toEqual([]);
+
+        const stored = await chrome.storage.local.get('settings');
+        expect((stored.settings as { genericSites: string[] }).genericSites).toEqual([]);
+      });
+
+      it('registers the script for a stored origin that already has permission but no registration yet', async () => {
+        await chrome.storage.local.set({ settings: { genericSites: [origin] } });
+        await chrome.permissions.request({ origins: [`${origin}/*`] }); // simulate a grant from a prior session
+
+        const bg = createBackground();
+        await bg.ready;
+
+        expect(await chrome.scripting.getRegisteredContentScripts({ ids: [id()] })).toEqual([expectedSpec()]);
+        const state = await bg.handle({ type: 'getState' });
+        if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+        expect(state.settings.genericSites).toEqual([origin]);
+      });
+
+      it('unregisters a jd- script whose origin is no longer in settings', async () => {
+        const first = createBackground();
+        await first.ready;
+        await first.handle({ type: 'enableSite', origin }); // registers the script and adds it to settings
+        // Simulate a settings edit that dropped the origin without going through disableSite (e.g. a
+        // manual storage edit): the dynamic registration is left behind.
+        await chrome.storage.local.set({ settings: { genericSites: [] } });
+
+        const second = createBackground();
+        await second.ready;
+        expect(await chrome.scripting.getRegisteredContentScripts({ ids: [id()] })).toEqual([]);
+      });
+
+      it('leaves a non-jd- registered script untouched (only jd-prefixed ids are reconciled)', async () => {
+        await chrome.scripting.registerContentScripts([{ id: 'not-ours', matches: ['https://example.com/*'], js: ['x.js'], runAt: 'document_idle' }]);
+        const bg = createBackground();
+        await bg.ready;
+        expect(await chrome.scripting.getRegisteredContentScripts({ ids: ['not-ours'] })).toHaveLength(1);
+      });
+    });
+
+    describe('isSiteEnabled reflects enableSite/disableSite', () => {
+      it('is true only after enableSite, and false again after disableSite', async () => {
+        const bg = createBackground();
+        await bg.ready;
+
+        expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: false });
+
+        await bg.handle({ type: 'enableSite', origin });
+        expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: true });
+
+        await bg.handle({ type: 'disableSite', origin });
+        expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: false });
+      });
+    });
+
+    // Only the popup may change which sites are enabled — same rule as getState, and for the same
+    // reason: a content script shares its world with the page, so a compromised/malicious page must
+    // not be able to grant itself (or any other origin) the adapter just by sending a message.
+    describe('content-script isolation (only the popup may change sites)', () => {
+      const fromTab = { tab: { id: 1 }, origin: 'https://x.com' };
+
+      it('refuses enableSite/disableSite from a tab, but serves them without a tab (the popup)', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        expect(await bg.handle({ type: 'enableSite', origin }, fromTab)).toEqual({ ok: false, error: 'enableSite is not available to content scripts' });
+        expect(await bg.handle({ type: 'disableSite', origin }, fromTab)).toEqual({ ok: false, error: 'disableSite is not available to content scripts' });
+        expect(await bg.handle({ type: 'enableSite', origin })).toMatchObject({ ok: true, type: 'enableSite' });
+      });
+
+      it('serves enableSite to an extension page opened in a tab, identified by its origin', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        const fromExtensionTab = { tab: { id: 2 }, origin: EXTENSION_ORIGIN };
+        expect(await bg.handle({ type: 'enableSite', origin }, fromExtensionTab)).toMatchObject({ ok: true, type: 'enableSite' });
+      });
+    });
+
+    describe('origin validation', () => {
+      it.each(['not a url', 'ftp://mastodon.social', 'https://mastodon.social/path', 'https://mastodon.social/', 'https://mastodon.social?x=1'])(
+        'rejects %s as invalid for enableSite',
+        async (badOrigin) => {
+          const bg = createBackground();
+          await bg.ready;
+          expect(await bg.handle({ type: 'enableSite', origin: badOrigin })).toEqual({ ok: false, error: 'invalid origin' });
+        },
+      );
+
+      it('rejects an invalid origin for disableSite too', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        expect(await bg.handle({ type: 'disableSite', origin: 'not a url' })).toEqual({ ok: false, error: 'invalid origin' });
+      });
+
+      it('accepts an origin with a port', async () => {
+        const bg = createBackground();
+        await bg.ready;
+        const portedOrigin = 'http://127.0.0.1:4173';
+        expect(await bg.handle({ type: 'enableSite', origin: portedOrigin })).toEqual({ ok: true, type: 'enableSite', genericSites: [portedOrigin] });
+      });
     });
   });
 

@@ -24,6 +24,7 @@ import { resolveProviders } from '../core/providers/resolve';
 import type { JevProvider, LlmProvider } from '../core/providers/types';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
 import type { PagePlatform, PageSeenReport, Request, Response, Sender, Settings } from './messages';
+import { isValidOrigin, reconcileSites, registerSite, unregisterSite } from './sites';
 import { loadExamples, loadPageSeen, loadSettings, loadStats, loadVerdicts, MAX_PAGE_REPORTS, MAX_VERDICTS, saveExamples, savePageSeen, saveSettings, saveStats, saveVerdicts } from './storage';
 
 interface Resolved {
@@ -189,7 +190,17 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     // well-formed entries, but the warm is still wrapped in its own try/catch so that even an
     // unforeseen failure here can never leave `agent` undefined for the rest of this handler's life.
     settings = loadedSettings;
-    agent = await buildAgent(loadedSettings, ExampleStore.fromJSON(loadedExamples));
+    try {
+      // Reconcile dynamic generic-site registrations against the permissions Chrome actually holds
+      // (design §4) before anything else can see `settings` — see sites.ts's reconcileSites doc
+      // comment. Wrapped the same way as the cache warm below: an unforeseen failure here (e.g. the
+      // scripting/permissions APIs misbehaving) must not leave `agent` unbuilt for the rest of this
+      // service worker's life.
+      settings = await saveSettings({ genericSites: await reconcileSites(loadedSettings.genericSites) });
+    } catch (err) {
+      console.error('jev-duo background: site reconciliation failed', err);
+    }
+    agent = await buildAgent(settings, ExampleStore.fromJSON(loadedExamples));
     try {
       for (const [key, verdict] of verdictEntries) cache.set(key, verdict);
     } catch (err) {
@@ -284,6 +295,33 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     return { ok: true, type: 'resetStats' };
   }
 
+  /** Registers `origin`'s dynamic content script (updating it in place if already registered — see
+   * sites.ts), then adds it to `settings.genericSites` (sorted, unique: enabling an already-enabled
+   * origin is a no-op past the register-or-update step). */
+  async function handleEnableSite(origin: string): Promise<Response> {
+    if (!isValidOrigin(origin)) return { ok: false, error: 'invalid origin' };
+    await registerSite(origin);
+    const genericSites = [...new Set([...settings.genericSites, origin])].sort();
+    settings = await saveSettings({ genericSites });
+    return { ok: true, type: 'enableSite', genericSites: settings.genericSites };
+  }
+
+  /** Unregisters `origin`'s dynamic content script, best-effort releases the host permission (a
+   * rejection is swallowed: the site is fully disabled on jev-duo's side either way — see sites.ts),
+   * then drops it from `settings.genericSites`. */
+  async function handleDisableSite(origin: string): Promise<Response> {
+    if (!isValidOrigin(origin)) return { ok: false, error: 'invalid origin' };
+    await unregisterSite(origin);
+    try {
+      await chrome.permissions.remove({ origins: [`${origin}/*`] });
+    } catch {
+      // ignored — see doc comment above
+    }
+    const genericSites = settings.genericSites.filter((o) => o !== origin);
+    settings = await saveSettings({ genericSites });
+    return { ok: true, type: 'disableSite', genericSites: settings.genericSites };
+  }
+
   /** Records one content script's post count for its tab, dropping the least recently reporting tab
    * once the cap is reached (delete-then-set keeps insertion order == recency), and mirrors the
    * result to session storage so it outlives this service worker. A failed mirror write is logged
@@ -338,6 +376,10 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
         return enqueueMutation(() => handleSetSettings(req.patch));
       case 'resetStats':
         return enqueueMutation(() => handleResetStats());
+      case 'enableSite':
+        return enqueueMutation(() => handleEnableSite(req.origin));
+      case 'disableSite':
+        return enqueueMutation(() => handleDisableSite(req.origin));
       default:
         return { ok: false, error: `unknown request type: ${(req as { type: string }).type}` };
     }
@@ -351,6 +393,11 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       // future code. Refusing is also the fallback when the origin can't be established at all.
       if (req.type === 'getState' && isPageContext(sender)) {
         return { ok: false, error: 'getState is not available to content scripts' };
+      }
+      // Same rule, same reason, for the two requests that change which sites are enabled: a page must
+      // never be able to grant itself (or any other origin) the adapter just by sending a message.
+      if ((req.type === 'enableSite' || req.type === 'disableSite') && isPageContext(sender)) {
+        return { ok: false, error: `${req.type} is not available to content scripts` };
       }
       await ready;
       return await dispatch(req, sender);

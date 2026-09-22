@@ -46,12 +46,70 @@ export interface ChromeStub {
   dispatch(message: unknown, sender: unknown): Promise<unknown>;
   /** What `chrome.tabs.query` resolves to; the popup reads `[0].id`. */
   setTabs(tabs: Array<{ id?: number }>): void;
+  /** Makes the NEXT `chrome.permissions.request(...)` call resolve `false` (as if the user dismissed
+   * Chrome's own permission prompt) without granting anything, then reverts to the default (grant
+   * whatever was asked). One-shot, mirroring how a test drives one specific click. */
+  denyNextPermissionRequest(): void;
 }
 
 export function installChromeStub(): ChromeStub {
   const listeners: Listener[] = [];
   let lastError: { message: string } | undefined;
   let tabs: Array<{ id?: number }> = [];
+
+  // In-memory stand-in for the origin patterns Chrome would actually hold host permission for (e.g.
+  // "https://mastodon.social/*"), and for the extension's dynamically registered content scripts,
+  // keyed by id. Both are exercised only through the chrome.permissions/chrome.scripting surface below
+  // — nothing here is reachable except by calling those, same as the real APIs.
+  const grantedOrigins = new Set<string>();
+  let denyNextRequest = false;
+  const scriptRegistry = new Map<string, chrome.scripting.RegisteredContentScript>();
+
+  const permissions = {
+    async request(perm: chrome.permissions.Permissions): Promise<boolean> {
+      if (denyNextRequest) {
+        denyNextRequest = false;
+        return false;
+      }
+      for (const origin of perm.origins ?? []) grantedOrigins.add(origin);
+      return true;
+    },
+    async remove(perm: chrome.permissions.Permissions): Promise<boolean> {
+      for (const origin of perm.origins ?? []) grantedOrigins.delete(origin);
+      return true;
+    },
+    async contains(perm: chrome.permissions.Permissions): Promise<boolean> {
+      return (perm.origins ?? []).every((origin) => grantedOrigins.has(origin));
+    },
+  };
+
+  // registerContentScripts rejects on a duplicate id (mirroring Chrome) so background.ts is forced to
+  // use getRegisteredContentScripts + updateContentScripts for an already-registered origin, exactly
+  // as the design requires rather than as an untested convention.
+  const scripting = {
+    async registerContentScripts(scripts: chrome.scripting.RegisteredContentScript[]): Promise<void> {
+      for (const script of scripts) {
+        if (scriptRegistry.has(script.id)) throw new Error(`jev-duo chrome stub: duplicate script id '${script.id}'`);
+      }
+      for (const script of scripts) scriptRegistry.set(script.id, script);
+    },
+    async updateContentScripts(scripts: chrome.scripting.RegisteredContentScript[]): Promise<void> {
+      for (const script of scripts) {
+        if (!scriptRegistry.has(script.id)) throw new Error(`jev-duo chrome stub: no such script id '${script.id}'`);
+      }
+      for (const script of scripts) scriptRegistry.set(script.id, script);
+    },
+    async unregisterContentScripts(filter?: chrome.scripting.ContentScriptFilter): Promise<void> {
+      const ids = filter?.ids ?? [...scriptRegistry.keys()];
+      for (const id of ids) scriptRegistry.delete(id);
+    },
+    async getRegisteredContentScripts(filter?: chrome.scripting.ContentScriptFilter): Promise<chrome.scripting.RegisteredContentScript[]> {
+      const all = [...scriptRegistry.values()];
+      if (!filter?.ids) return all;
+      const ids = new Set(filter.ids);
+      return all.filter((s) => ids.has(s.id));
+    },
+  };
 
   const runtime = {
     get lastError() {
@@ -95,6 +153,8 @@ export function installChromeStub(): ChromeStub {
         return tabs;
       },
     },
+    permissions,
+    scripting,
   };
 
   return {
@@ -109,6 +169,9 @@ export function installChromeStub(): ChromeStub {
     },
     setTabs(next) {
       tabs = next;
+    },
+    denyNextPermissionRequest() {
+      denyNextRequest = true;
     },
   };
 }

@@ -67,7 +67,13 @@ export type Request =
   | { type: 'isSiteEnabled'; platform: PagePlatform; origin?: string }
   | { type: 'pageSeen'; platform: PagePlatform; seen: number }
   | { type: 'setSettings'; patch: Partial<Settings> }
-  | { type: 'resetStats' };
+  | { type: 'resetStats' }
+  // Grants (or revokes) the generic adapter for one origin: registers (or unregisters) its dynamic
+  // content script and updates `settings.genericSites` — see background.ts/sites.ts. Like `getState`,
+  // both are refused for a content-script sender (only the popup may change which sites are enabled);
+  // unlike `getState`, they carry no secrets, so the refusal is about write access, not privacy.
+  | { type: 'enableSite'; origin: string }
+  | { type: 'disableSite'; origin: string };
 
 export type Response =
   | { ok: true; type: 'judge'; verdicts: Verdict[] }
@@ -94,6 +100,9 @@ export type Response =
   | { ok: true; type: 'isSiteEnabled'; enabled: boolean }
   | { ok: true; type: 'pageSeen' }
   | { ok: true; type: 'setSettings' | 'resetStats' }
+  // `genericSites` is the FULL resulting list (sorted, unique) so the popup never has to derive it
+  // locally from the request it just sent.
+  | { ok: true; type: 'enableSite' | 'disableSite'; genericSites: string[] }
   | { ok: false; error: string };
 
 /** Wraps `chrome.runtime.sendMessage` in a Promise: resolves `{ok:false,error}` (never rejects) when
