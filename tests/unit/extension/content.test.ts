@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { xAdapter } from '../../../src/extension/adapters/x';
 import type { Item, Verdict } from '../../../src/core/types';
-import { boot, startContentScript } from '../../../src/extension/content';
+import { boot, startContentScript, startOnce } from '../../../src/extension/content';
 import type { Request, Response, send } from '../../../src/extension/messages';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -427,5 +427,54 @@ describe('boot', () => {
     await boot({ doc, loc: { href: 'https://example.com/' } as Location, send: asSend(send), start });
     expect(send).toHaveBeenCalledWith({ type: 'isSiteEnabled', platform: 'generic', origin: undefined });
     expect(start).not.toHaveBeenCalled();
+  });
+
+  // Fix wave, I6a: a site can be matched by BOTH the manifest's static content_scripts entry and its
+  // own dynamic registration (the e2e's patched manifest is exactly that), and Chrome then injects
+  // this bundle twice into the same page — two observers, two scans, two judge batches per post.
+  describe('startOnce', () => {
+    afterEach(() => {
+      delete (globalThis as { __jevDuoStarted?: boolean }).__jevDuoStarted;
+    });
+
+    it('boots on the first call and does nothing at all on the second', async () => {
+      const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+      const send = makeIsSiteEnabledSend(true);
+      const start = vi.fn();
+      const scope: Record<string, unknown> = {};
+
+      expect(await startOnce({ doc, loc, send: asSend(send), start }, scope)).toBe(true);
+      expect(await startOnce({ doc, loc, send: asSend(send), start }, scope)).toBe(false);
+
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledTimes(1); // the second injection never even asks isSiteEnabled
+    });
+
+    // The flag is set SYNCHRONOUSLY, before the (async) isSiteEnabled round trip, so a second injection
+    // landing while the first is still in flight is still a no-op.
+    it('claims the flag before awaiting anything, so two overlapping injections still start once', async () => {
+      const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+      const send = makeIsSiteEnabledSend(true);
+      const start = vi.fn();
+      const scope: Record<string, unknown> = {};
+
+      const [first, second] = await Promise.all([
+        startOnce({ doc, loc, send: asSend(send), start }, scope),
+        startOnce({ doc, loc, send: asSend(send), start }, scope),
+      ]);
+      expect([first, second]).toEqual([true, false]);
+      expect(start).toHaveBeenCalledTimes(1);
+    });
+
+    it('defaults to the real global scope', async () => {
+      const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+      const send = makeIsSiteEnabledSend(true);
+      const start = vi.fn();
+
+      expect(await startOnce({ doc, loc, send: asSend(send), start })).toBe(true);
+      expect((globalThis as { __jevDuoStarted?: boolean }).__jevDuoStarted).toBe(true);
+      expect(await startOnce({ doc, loc, send: asSend(send), start })).toBe(false);
+      expect(start).toHaveBeenCalledTimes(1);
+    });
   });
 });

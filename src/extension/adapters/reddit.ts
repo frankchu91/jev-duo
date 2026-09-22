@@ -8,6 +8,12 @@ import type { Item, ItemMeta } from '../../core/types';
 import type { Adapter } from './types';
 
 const BODY_MAX = 1500;
+/** The hosts this adapter claims, and only these. The shipped manifest injects the content script on
+ * `https://www.reddit.com/*` alone, and the shreddit selectors below describe that redesign; the apex
+ * is here because it redirects there. `old.reddit.com` renders completely different markup, so it is
+ * deliberately NOT claimed — `pickAdapter` falls through to the generic adapter, which the user opts
+ * into per origin like any other site, instead of a built-in adapter that would find nothing there. */
+const HOSTS = new Set(['www.reddit.com', 'reddit.com']);
 
 function titleOf(el: Element): string | undefined {
   const attr = el.getAttribute('post-title');
@@ -29,7 +35,7 @@ export const redditAdapter: Adapter = {
   platform: 'reddit',
 
   matches(url) {
-    return /(^|\.)reddit\.com$/i.test(url.hostname);
+    return HOSTS.has(url.hostname.toLowerCase());
   },
 
   findPosts(root) {

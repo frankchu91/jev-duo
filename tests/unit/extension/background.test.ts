@@ -205,6 +205,34 @@ describe('background', () => {
       expect(state.stats.judged).toBe(0); // ...via a real rebuild
     });
 
+    // Fix wave, I1: `genericSites` is owned by enableSite/disableSite — the only handlers that also
+    // register the content script, hold the host permission, and are refused to a content-script
+    // sender. A setSettings patch carrying it would add an origin behind all three gates, so the field
+    // is dropped from every patch (the popup never sends it in the first place).
+    it('ignores genericSites in a setSettings patch: only enableSite/disableSite own that field', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'enableSite', origin: 'https://mastodon.social' });
+
+      const res = await bg.handle({ type: 'setSettings', patch: { genericSites: ['https://evil.example'], strictness: 0.8 } });
+      expect(res).toEqual({ ok: true, type: 'setSettings' });
+
+      const state = await bg.handle({ type: 'getState' });
+      if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+      expect(state.settings.genericSites).toEqual(['https://mastodon.social']); // unchanged
+      expect(state.settings.strictness).toBe(0.8); // ...and the rest of the patch still applied
+
+      const stored = await chrome.storage.local.get('settings');
+      expect((stored.settings as { genericSites: string[] }).genericSites).toEqual(['https://mastodon.social']);
+      // The smuggled origin never reached chrome.scripting either.
+      expect(await chrome.scripting.getRegisteredContentScripts({ ids: [`jd-${fnv1a('https://evil.example')}`] })).toEqual([]);
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin: 'https://evil.example' })).toEqual({
+        ok: true,
+        type: 'isSiteEnabled',
+        enabled: false,
+      });
+    });
+
     it('rebuilds the agent but keeps the compiled pack and accumulated examples', async () => {
       const bg = createBackground();
       await bg.ready;
@@ -695,6 +723,62 @@ describe('background', () => {
         const bg = createBackground();
         await bg.ready;
         expect(await chrome.scripting.getRegisteredContentScripts({ ids: ['not-ours'] })).toHaveLength(1);
+      });
+
+      // Fix wave, I2: stored settings can hold anything an older version or a hand edit put there, and
+      // every entry here becomes a match pattern (`origin + '/*'`) and a chrome.scripting id. A garbage
+      // entry is dropped from settings rather than handed to Chrome, and it must not cost the valid
+      // origins beside it their reconciliation.
+      it('drops entries that are not exact http(s) origins, and still reconciles the valid ones', async () => {
+        await chrome.storage.local.set({ settings: { genericSites: ['not a url', 'https://mastodon.social/path', 'javascript:alert(1)', origin] } });
+        await chrome.permissions.request({ origins: [`${origin}/*`] });
+
+        const bg = createBackground();
+        await bg.ready;
+
+        const state = await bg.handle({ type: 'getState' });
+        if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+        expect(state.settings.genericSites).toEqual([origin]);
+        expect(await chrome.scripting.getRegisteredContentScripts({ ids: [id()] })).toEqual([expectedSpec()]);
+      });
+
+      // One origin's chrome.permissions.contains rejecting used to reject the whole `await` chain, so
+      // init() logged one failure and left EVERY generic site unreconciled (and settings unwritten).
+      it('a permissions.contains that rejects for one origin does not stop the others', async () => {
+        const other = 'https://lobste.rs';
+        await chrome.storage.local.set({ settings: { genericSites: [origin, other] } });
+        await chrome.permissions.request({ origins: [`${origin}/*`, `${other}/*`] });
+
+        const realContains = chrome.permissions.contains.bind(chrome.permissions);
+        vi.spyOn(chrome.permissions, 'contains').mockImplementation(async (perm: chrome.permissions.Permissions) => {
+          if (perm.origins?.includes(`${origin}/*`)) throw new Error('permissions API is unavailable');
+          return realContains(perm);
+        });
+
+        const bg = createBackground();
+        await bg.ready;
+
+        const state = await bg.handle({ type: 'getState' });
+        if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+        // The unconfirmable origin is dropped (fail closed); the other one is kept AND registered.
+        expect(state.settings.genericSites).toEqual([other]);
+        expect(await chrome.scripting.getRegisteredContentScripts({ ids: [`jd-${fnv1a(other)}`] })).toHaveLength(1);
+        expect(await chrome.scripting.getRegisteredContentScripts({ ids: [id()] })).toEqual([]);
+      });
+
+      // init() runs on every service-worker wake-up, and the usual outcome is "nothing to repair".
+      it('writes settings only when reconciliation actually changed the list', async () => {
+        await chrome.storage.local.set({ settings: { genericSites: [origin] } });
+        await chrome.permissions.request({ origins: [`${origin}/*`] });
+
+        const setSpy = vi.spyOn(chrome.storage.local, 'set');
+        const bg = createBackground();
+        await bg.ready;
+        expect(setSpy).not.toHaveBeenCalled(); // nothing to repair: no write at all
+
+        const state = await bg.handle({ type: 'getState' });
+        if (!state.ok || state.type !== 'getState') throw new Error('expected a getState response');
+        expect(state.settings.genericSites).toEqual([origin]); // ...and the live settings are still right
       });
     });
 

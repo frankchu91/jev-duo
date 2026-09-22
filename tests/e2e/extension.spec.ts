@@ -4,12 +4,16 @@
 // settings/pack.
 
 import { expect, test } from '@playwright/test';
+import { fnv1a } from '../../src/core/hash';
 import {
   compileIntent,
+  disableSite,
+  enableSite,
   fixtureUrl,
   getState,
   judged,
   launchWithExtension,
+  registeredContentScripts,
   resetStats,
   seedSettings,
   waitForAtLeastJudged,
@@ -185,7 +189,10 @@ test('popup shows the compiled intent and rules', async () => {
 const GENERIC_URL = `${FIXTURE_ORIGIN}/generic.html`;
 
 test('generic: the origin gate holds when the site is not enabled', async () => {
-  await seedSettings(ext, { genericSites: [] });
+  // Through the real handler: `setSettings` drops `genericSites` (only enableSite/disableSite own it),
+  // so a spec can no longer seed the list behind them. Disabling an origin that was never enabled is
+  // a no-op that still leaves the list empty.
+  expect(await disableSite(ext, FIXTURE_ORIGIN)).toEqual([]);
 
   const page = await ext.context.newPage();
   await page.goto(GENERIC_URL);
@@ -212,7 +219,8 @@ test('generic: the origin gate holds when the site is not enabled', async () => 
 });
 
 test('generic: folds the two shills and the ragebait post on the generic fixture, keeps the Rust one', async () => {
-  await seedSettings(ext, { providerMode: 'mock', mockFixtures: MOCK_FIXTURES, genericSites: [FIXTURE_ORIGIN] });
+  await seedSettings(ext, { providerMode: 'mock', mockFixtures: MOCK_FIXTURES });
+  expect(await enableSite(ext, FIXTURE_ORIGIN)).toEqual([FIXTURE_ORIGIN]);
 
   const page = await ext.context.newPage();
   await page.goto(GENERIC_URL);

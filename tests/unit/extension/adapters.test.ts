@@ -103,9 +103,15 @@ describe('xAdapter', () => {
 describe('redditAdapter', () => {
   const doc = loadDoc('reddit.html');
 
-  it('matches reddit.com and subdomains, not other hosts', () => {
+  // Fix wave, I6b: the adapter claims www.reddit.com (what the manifest injects on, and what these
+  // shreddit selectors were read off) plus the apex that redirects there — and nothing else.
+  // old.reddit.com renders entirely different markup, so claiming it meant a built-in adapter that
+  // silently found zero posts; it now falls through to the generic adapter's per-origin opt-in.
+  it('matches www.reddit.com and the apex only — never old.reddit.com or another subdomain', () => {
     expect(redditAdapter.matches(new URL('https://www.reddit.com/r/test'))).toBe(true);
-    expect(redditAdapter.matches(new URL('https://old.reddit.com/r/test'))).toBe(true);
+    expect(redditAdapter.matches(new URL('https://reddit.com/r/test'))).toBe(true);
+    expect(redditAdapter.matches(new URL('https://old.reddit.com/r/test'))).toBe(false);
+    expect(redditAdapter.matches(new URL('https://sh.reddit.com/r/test'))).toBe(false);
     expect(redditAdapter.matches(new URL('https://example.com'))).toBe(false);
   });
 
@@ -196,10 +202,24 @@ describe('hnAdapter', () => {
 });
 
 describe('pickAdapter', () => {
-  it('honours the jd-platform override regardless of hostname', () => {
+  it('honours the jd-platform override on the fixture hosts', () => {
     expect(pickAdapter(new URL('http://localhost:4173/x.html?jd-platform=x'))?.platform).toBe('x');
     expect(pickAdapter(new URL('http://127.0.0.1:4173/reddit.html?jd-platform=reddit'))?.platform).toBe('reddit');
     expect(pickAdapter(new URL('http://127.0.0.1:4173/hn.html?jd-platform=hn'))?.platform).toBe('hn');
+  });
+
+  // Fix wave, I4: the override is a fixture-server affordance, not a feature. Honouring it anywhere
+  // would let any site pick jev-duo's adapter for its own pages through a query string it controls —
+  // e.g. a link swapping x.com's hand-written adapter for the structural heuristic.
+  it('ignores the jd-platform override on any host but localhost/127.0.0.1', () => {
+    expect(pickAdapter(new URL('https://x.com/home?jd-platform=generic'))?.platform).toBe('x');
+    expect(pickAdapter(new URL('https://example.com/feed?jd-platform=hn'))?.platform).toBe('generic');
+    expect(pickAdapter(new URL('https://localhost.evil.example/?jd-platform=x'))?.platform).toBe('generic');
+  });
+
+  // Fix wave, I6b: with the reddit adapter no longer claiming it, old.reddit.com is just another site.
+  it('falls through to generic on old.reddit.com', () => {
+    expect(pickAdapter(new URL('https://old.reddit.com/r/programming'))?.platform).toBe('generic');
   });
 
   it('matches by hostname when there is no override', () => {

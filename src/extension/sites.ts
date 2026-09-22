@@ -1,7 +1,9 @@
 // Dynamic per-site content-script registration for the generic adapter (design §4). Isolated from
-// background.ts because it is the only place that touches chrome.scripting/chrome.permissions — the
-// three built-in sites are matched by the STATIC content_scripts entry in manifest.json and never go
-// through here at all.
+// background.ts because it is the only place in the service worker that touches
+// chrome.scripting/chrome.permissions — the one call that lives elsewhere is the popup's
+// `permissions.request`, which Chrome will only honour from inside a user-gesture handler. The three
+// built-in sites are matched by the STATIC content_scripts entry in manifest.json and never go through
+// here at all.
 
 import { fnv1a } from '../core/hash';
 
@@ -48,34 +50,70 @@ export async function registerSite(origin: string): Promise<void> {
   else await chrome.scripting.registerContentScripts([spec]);
 }
 
-/** Unregisters the dynamic content script for `origin`, if one is registered. */
+/** Unregisters the dynamic content script for `origin`, if one is registered, and hands the host
+ * permission back. The permission release is best-effort: Chrome refuses to remove a permission the
+ * manifest declares as required (which is how the e2e's patched manifest holds the fixture origin),
+ * and a rejection there must not fail the disable — jev-duo is fully off the site either way, since
+ * the script is gone and the origin is about to leave `settings.genericSites`. */
 export async function unregisterSite(origin: string): Promise<void> {
   const id = registrationId(origin);
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
   if (existing.length > 0) await chrome.scripting.unregisterContentScripts({ ids: [id] });
+  try {
+    await chrome.permissions.remove({ origins: [`${origin}/*`] });
+  } catch (err) {
+    console.error('jev-duo sites: releasing the host permission for', origin, 'failed', err);
+  }
 }
 
 /** Startup reconciliation (design §4): the source of truth for "is this origin really enabled" is
  * chrome.permissions, not settings — the user (or Chrome) can revoke a host permission at any time
- * outside jev-duo's own UI. Drops any `origins` entry whose permission is gone, (re-)registers the
- * rest, and unregisters any leftover `jd-` registration for an origin no longer in the kept list (e.g.
- * left behind by a manual settings edit that skipped `disableSite`). Returns the possibly-narrowed,
- * sorted list to persist back to `settings.genericSites`. */
+ * outside jev-duo's own UI. Drops any `origins` entry that is not a valid origin at all or whose
+ * permission is gone, (re-)registers the rest, and unregisters any leftover `jd-` registration for an
+ * origin no longer in the kept list (e.g. left behind by a manual settings edit that skipped
+ * `disableSite`). Every per-origin step is isolated, so one failure narrows the list by one entry
+ * instead of abandoning the whole reconciliation. Returns the possibly-narrowed, sorted list to
+ * persist back to `settings.genericSites`. */
 export async function reconcileSites(origins: string[]): Promise<string[]> {
   const kept: string[] = [];
-  for (const origin of origins) {
-    if (await chrome.permissions.contains({ origins: [`${origin}/*`] })) kept.push(origin);
+  // Anything that is not an exact http(s) origin could never have been granted or registered through
+  // `enableSite`, so it is dropped from settings outright rather than turned into a match pattern and
+  // handed to Chrome — storage can hold anything an older version (or a hand edit) put there.
+  for (const origin of origins.filter(isValidOrigin)) {
+    // Per origin, so one failure can't abort the whole reconciliation: an origin whose permission we
+    // cannot confirm is dropped (fail closed, same as a revoked one) and the loop carries on.
+    try {
+      if (await chrome.permissions.contains({ origins: [`${origin}/*`] })) kept.push(origin);
+    } catch (err) {
+      console.error('jev-duo sites: permission check failed for', origin, err);
+    }
   }
 
   const registered = await chrome.scripting.getRegisteredContentScripts();
   const registeredIds = new Set(registered.map((s) => s.id));
   const keptIds = new Set(kept.map(registrationId));
 
-  const toRegister = kept.filter((origin) => !registeredIds.has(registrationId(origin))).map(registrationSpec);
-  if (toRegister.length > 0) await chrome.scripting.registerContentScripts(toRegister);
+  // Also one call per origin (rather than one batch): a batch that Chrome rejects for a single bad
+  // entry would leave every other kept origin unregistered until the next service-worker start.
+  for (const origin of kept) {
+    if (registeredIds.has(registrationId(origin))) continue;
+    try {
+      await chrome.scripting.registerContentScripts([registrationSpec(origin)]);
+    } catch (err) {
+      // The origin keeps its permission and stays in settings: the next init() retries the
+      // registration, and until then the site simply isn't judged.
+      console.error('jev-duo sites: registering the content script for', origin, 'failed', err);
+    }
+  }
 
   const toUnregister = registered.filter((s) => s.id.startsWith(ID_PREFIX) && !keptIds.has(s.id)).map((s) => s.id);
-  if (toUnregister.length > 0) await chrome.scripting.unregisterContentScripts({ ids: toUnregister });
+  if (toUnregister.length > 0) {
+    try {
+      await chrome.scripting.unregisterContentScripts({ ids: toUnregister });
+    } catch (err) {
+      console.error('jev-duo sites: unregistering leftover content scripts failed', err);
+    }
+  }
 
   return kept.sort();
 }

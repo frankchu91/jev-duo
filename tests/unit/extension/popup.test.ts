@@ -418,6 +418,18 @@ describe('initPopup', () => {
       doc.dispatchEvent(new Event('unload'));
     });
 
+    // Fix wave, minor: `generic` is the adapter's name, not a site the user would recognise, so the
+    // one platform with no site name of its own says "this site" instead.
+    it('says "this site" rather than "generic" for a generic-adapter report', async () => {
+      withActiveTab(7);
+      const doc = loadDoc();
+      const send = makeFakeSend((req) => (req.type === 'getState' ? getStateResponse({}, STATS, 4, [report(7, 6, 'generic')]) : { ok: false, error: 'unhandled' }));
+      await initPopup(doc, { send: asSend(send) });
+
+      expect(el(doc, 'page-seen').textContent).toBe('6 posts seen on this site');
+      doc.dispatchEvent(new Event('unload'));
+    });
+
     it('spells out a zero count as a possible layout change', async () => {
       withActiveTab(7);
       const doc = loadDoc();
@@ -670,14 +682,34 @@ describe('initPopup', () => {
       delete (globalThis as { chrome?: unknown }).chrome;
     });
 
-    it('shows a built-in site as built in, with no button', async () => {
-      withActiveTabUrl('https://x.com/home');
+    it.each(['https://x.com/home', 'https://twitter.com/home', 'https://www.reddit.com/r/rust', 'https://news.ycombinator.com/'])(
+      'shows %s as built in, with no button',
+      async (url) => {
+        withActiveTabUrl(url);
+        const doc = loadDoc();
+        await initPopup(doc, { send: asSend(sendWithSites([], [])) });
+
+        expect(el(doc, 'site-origin').textContent).toBe(new URL(url).origin);
+        expect(el(doc, 'site-status').textContent).toBe('built in');
+        expect(el<HTMLButtonElement>(doc, 'site-toggle').hidden).toBe(true);
+
+        doc.dispatchEvent(new Event('unload'));
+      },
+    );
+
+    // Fix wave, I6b: the built-in list now comes from manifest.json (built-in-hosts.ts) rather than a
+    // regex that matched every reddit.com subdomain. old.reddit.com is NOT injected by the manifest and
+    // no adapter claims it, so labelling it `built in` hid the one control that would make it work.
+    it('offers old.reddit.com the per-origin opt-in rather than calling it built in', async () => {
+      withActiveTabUrl('https://old.reddit.com/r/programming');
       const doc = loadDoc();
       await initPopup(doc, { send: asSend(sendWithSites([], [])) });
 
-      expect(el(doc, 'site-origin').textContent).toBe('https://x.com');
-      expect(el(doc, 'site-status').textContent).toBe('built in');
-      expect(el<HTMLButtonElement>(doc, 'site-toggle').hidden).toBe(true);
+      expect(el(doc, 'site-origin').textContent).toBe('https://old.reddit.com');
+      expect(el(doc, 'site-status').textContent).toBe('');
+      const toggle = el<HTMLButtonElement>(doc, 'site-toggle');
+      expect(toggle.hidden).toBe(false);
+      expect(toggle.textContent).toBe('Enable on this site');
 
       doc.dispatchEvent(new Event('unload'));
     });
@@ -789,7 +821,33 @@ describe('initPopup', () => {
       expect(requestSpy).not.toHaveBeenCalled();
       expect(log).toContain('disableSite');
       expect(toggle.textContent).toBe('Enable on this site');
-      expect(el(doc, 'site-status').textContent).toBe('disabled');
+      // Fix wave, I3: unregistering the content script does not stop the copy already running in an
+      // open tab, so the status says what the user still has to do — the mirror image of the enable line.
+      expect(el(doc, 'site-status').textContent).toBe('disabled — reload the tab to stop judging');
+      expect(doc.querySelectorAll('#generic-sites li')).toHaveLength(0);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    // Fix wave, I6c: `chrome.permissions.request` can reject outright (an invalidated extension
+    // context, a gesture Chrome considers spent). That is not a decline — nothing was asked and
+    // nothing must be sent — and the popup has to say which of the two happened.
+    it('reports a rejecting permission request as a failure, and sends nothing', async () => {
+      withActiveTabUrl('https://mastodon.social/home');
+      const log: string[] = [];
+      const doc = loadDoc();
+      const send = sendWithSites([], log);
+      const { permissions } = (globalThis as unknown as { chrome: { permissions: { request(p: { origins?: string[] }): Promise<boolean> } } }).chrome;
+      vi.spyOn(permissions, 'request').mockRejectedValue(new Error('user gesture required'));
+      await initPopup(doc, { send: asSend(send) });
+
+      el<HTMLButtonElement>(doc, 'site-toggle').click();
+      await flush();
+
+      expect(log).not.toContain('enableSite');
+      expect(el(doc, 'site-status').textContent).toBe('permission request failed: user gesture required');
+      expect(el(doc, 'site-status').classList.contains('error')).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'site-toggle').textContent).toBe('Enable on this site');
       expect(doc.querySelectorAll('#generic-sites li')).toHaveLength(0);
 
       doc.dispatchEvent(new Event('unload'));

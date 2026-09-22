@@ -8,6 +8,7 @@
 
 import type { DuoStats } from '../../core/duo';
 import type { QuestionPack } from '../../core/types';
+import { isBuiltInHost } from '../built-in-hosts';
 import { send, type PageSeenReport, type Response, type Settings } from '../messages';
 
 const DEBOUNCE_MS = 300;
@@ -24,11 +25,6 @@ const MODEL_PLACEHOLDER: Record<Settings['providerMode'], string> = {
 
 const NO_PAGE_REPORT = 'no page report yet';
 const ZERO_SEEN = "0 posts seen on this page — the site's layout may have changed";
-
-/** Mirrors the three built-in adapters' own host matching (adapters/{x,reddit,hn}.ts). Those sites run
- * from the manifest's static `content_scripts` entry and are switched by the Sites checkboxes above,
- * so the This-site section below only ever says so — there is nothing per-origin to grant. */
-const BUILT_IN_HOST = /(^|\.)(x\.com|twitter\.com|reddit\.com)$|^news\.ycombinator\.com$/i;
 
 /** The active tab, used to pick this window's `pageSeen` report out of getState (by `id`) and to drive
  * the This-site section (by `url`, readable while the popup is open thanks to `activeTab`).
@@ -56,12 +52,22 @@ function parseHttpUrl(href: string): URL | undefined {
   }
 }
 
+/** The outcome of asking Chrome for one origin: granted, declined, or the call itself failing (an
+ * invalidated extension context, a prompt Chrome refuses to show because the gesture was already
+ * spent). The third case must not look like a decline — nothing was asked. */
+type PermissionOutcome = { ok: true; granted: boolean } | { ok: false; error: string };
+
 /** Chrome's own permission prompt for one origin. It MUST be called synchronously from the popup's
  * click handler — Chrome requires a user gesture, and the service worker has none, which is why
- * background.ts/sites.ts never request permissions themselves (design §4). */
-async function requestOrigin(origin: string): Promise<boolean> {
-  if (typeof chrome === 'undefined' || !chrome.permissions?.request) return false;
-  return chrome.permissions.request({ origins: [`${origin}/*`] });
+ * background.ts/sites.ts never request permissions themselves (design §4). A rejection is reported
+ * rather than thrown, so the caller can show it and send nothing. */
+async function requestOrigin(origin: string): Promise<PermissionOutcome> {
+  if (typeof chrome === 'undefined' || !chrome.permissions?.request) return { ok: true, granted: false };
+  try {
+    return { ok: true, granted: await chrome.permissions.request({ origins: [`${origin}/*`] }) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Every id here is baked into popup.html, so a miss means the two have drifted apart — fail loudly
@@ -239,7 +245,10 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
    * adapter whose selectors have gone stale shows up here as a visible zero instead of silence. */
   function fillPageSeen(reports: PageSeenReport[], tabId: number | undefined): void {
     const report = tabId === undefined ? undefined : reports.find((r) => r.tabId === tabId);
-    pageSeenEl.textContent = !report ? NO_PAGE_REPORT : report.seen === 0 ? ZERO_SEEN : `${report.seen} posts seen on ${report.platform}`;
+    // `generic` is the adapter's name, not a site's: "6 posts seen on generic" reads like a place the
+    // user has never heard of, where every other platform id is one they recognise.
+    const where = report?.platform === 'generic' ? 'this site' : report?.platform;
+    pageSeenEl.textContent = !report ? NO_PAGE_REPORT : report.seen === 0 ? ZERO_SEEN : `${report.seen} posts seen on ${where}`;
     pageSeenEl.classList.toggle('error', report?.seen === 0);
   }
 
@@ -353,10 +362,19 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
       const origin = siteOrigin;
       if (origin === undefined) return;
       if (genericSites.includes(origin)) {
-        await applySiteChange('disableSite', origin, 'disabled');
+        // Disabling unregisters the content script, but a tab that already loaded it keeps running it
+        // until it is reloaded — same shape of promise as the enable line, in reverse (spec §5).
+        await applySiteChange('disableSite', origin, 'disabled — reload the tab to stop judging');
         return;
       }
-      if (!(await requestOrigin(origin))) {
+      const asked = await requestOrigin(origin);
+      if (!asked.ok) {
+        // Nothing was granted and nothing was sent: say what failed rather than blame the user for a
+        // decline they never made.
+        renderThisSite(`permission request failed: ${asked.error}`, true);
+        return;
+      }
+      if (!asked.granted) {
         renderThisSite('permission declined');
         return;
       }
@@ -373,7 +391,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   tabId = tab?.id;
   const parsedUrl = parseHttpUrl(deps.activeTabUrl ?? tab?.url ?? '');
   siteOrigin = parsedUrl?.origin;
-  siteBuiltIn = parsedUrl !== undefined && BUILT_IN_HOST.test(parsedUrl.hostname);
+  siteBuiltIn = parsedUrl !== undefined && isBuiltInHost(parsedUrl.hostname);
 
   const initial = await send({ type: 'getState' });
   if (initial.ok && initial.type === 'getState') {

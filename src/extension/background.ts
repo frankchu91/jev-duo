@@ -79,6 +79,12 @@ function resolveForSettings(settings: Settings, fetchImpl?: typeof fetch): Resol
   return { jev, llm, hasKeys: false };
 }
 
+/** Order-sensitive equality for two origin lists: `reconcileSites` returns a sorted list, so a stored
+ * list that differs only in order is treated as changed and rewritten once, sorted, and then matches. */
+function sameOrigins(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((origin, i) => origin === b[i]);
+}
+
 /** True when `next` would resolve to different provider instances than `prev` (a providerMode or any
  * key change). The verdict cache key (pack.compiledAt + item.id + item.text) doesn't include the
  * provider at all, so a probability cached from one provider must never be served as if it came from
@@ -195,8 +201,10 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       // (design §4) before anything else can see `settings` — see sites.ts's reconcileSites doc
       // comment. Wrapped the same way as the cache warm below: an unforeseen failure here (e.g. the
       // scripting/permissions APIs misbehaving) must not leave `agent` unbuilt for the rest of this
-      // service worker's life.
-      settings = await saveSettings({ genericSites: await reconcileSites(loadedSettings.genericSites) });
+      // service worker's life. The write only happens when reconciliation actually changed the list:
+      // init() runs on every service-worker wake-up, and the usual outcome is "nothing to repair".
+      const genericSites = await reconcileSites(loadedSettings.genericSites);
+      if (!sameOrigins(genericSites, loadedSettings.genericSites)) settings = await saveSettings({ genericSites });
     } catch (err) {
       console.error('jev-duo background: site reconciliation failed', err);
     }
@@ -265,7 +273,13 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
 
   async function handleSetSettings(patch: Partial<Settings>): Promise<Response> {
     const before = settings;
-    const saved = await saveSettings(patch);
+    // `genericSites` is owned by enableSite/disableSite alone: they are the only pair that also
+    // registers/unregisters the origin's content script and holds (or hands back) its host permission,
+    // and the only pair refused to a content-script sender. A setSettings patch that could add an
+    // origin here would grant the adapter a site behind both of those gates, so the field is dropped
+    // from every patch — the popup never sends it.
+    const { genericSites: _ignoredGenericSites, ...safePatch } = patch;
+    const saved = await saveSettings(safePatch);
 
     await waitForInFlightJudges(); // let any judge still using the OLD agent/cache finish first
     try {
@@ -306,17 +320,12 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     return { ok: true, type: 'enableSite', genericSites: settings.genericSites };
   }
 
-  /** Unregisters `origin`'s dynamic content script, best-effort releases the host permission (a
-   * rejection is swallowed: the site is fully disabled on jev-duo's side either way — see sites.ts),
-   * then drops it from `settings.genericSites`. */
+  /** Unregisters `origin`'s dynamic content script and releases its host permission (both in sites.ts,
+   * which owns every chrome.scripting/chrome.permissions call the worker makes; the permission release
+   * is best-effort there), then drops it from `settings.genericSites`. */
   async function handleDisableSite(origin: string): Promise<Response> {
     if (!isValidOrigin(origin)) return { ok: false, error: 'invalid origin' };
     await unregisterSite(origin);
-    try {
-      await chrome.permissions.remove({ origins: [`${origin}/*`] });
-    } catch {
-      // ignored — see doc comment above
-    }
     const genericSites = settings.genericSites.filter((o) => o !== origin);
     settings = await saveSettings({ genericSites });
     return { ok: true, type: 'disableSite', genericSites: settings.genericSites };

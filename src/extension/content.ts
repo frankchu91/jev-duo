@@ -224,8 +224,30 @@ export async function boot(deps: BootDeps): Promise<void> {
   deps.start(deps.doc, deps.loc, { send: deps.send });
 }
 
+/** The flag one injection of this script leaves behind for the next one, on the isolated world every
+ * content script of this extension shares within a frame. */
+const STARTED_FLAG = '__jevDuoStarted';
+
+/** Boots at most once per frame. A site the user enabled can be matched by BOTH the manifest's static
+ * `content_scripts` entry and its own dynamic registration (the e2e's patched manifest is exactly that
+ * case, and so is any future manifest addition of a site someone had already opted into), and Chrome
+ * then injects this bundle twice into the same page — two MutationObservers, two scans, two judge
+ * batches for every post. The flag is set SYNCHRONOUSLY, before the async `boot`, so a second
+ * injection that lands while the first is still awaiting `isSiteEnabled` still sees it.
+ *
+ * `scope` defaults to the real global; tests pass a plain object instead of mutating it. */
+export async function startOnce(
+  deps: BootDeps,
+  scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>,
+): Promise<boolean> {
+  if (scope[STARTED_FLAG]) return false;
+  scope[STARTED_FLAG] = true;
+  await boot(deps);
+  return true;
+}
+
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
-  void boot({ doc: document, loc: location, send, start: startContentScript }).catch((err: unknown) =>
+  void startOnce({ doc: document, loc: location, send, start: startContentScript }).catch((err: unknown) =>
     console.error('jev-duo content script: boot failed', err),
   );
 }

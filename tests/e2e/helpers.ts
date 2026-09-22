@@ -170,6 +170,31 @@ export async function resetStats(ext: LaunchedExtension): Promise<void> {
   assertOk(await callBackground(ext, { type: 'resetStats' }), 'resetStats');
 }
 
+/** Opts `origin` into the generic adapter through the REAL handler — `setSettings` deliberately drops
+ * `genericSites` (only these two own it), so a spec cannot seed the list behind their back. No Chrome
+ * permission prompt is involved: the patched manifest already declares the fixture origin as a
+ * required host permission (see `patchExtension`), which is also what makes the registration below
+ * succeed. Returns the resulting list. */
+export async function enableSite(ext: LaunchedExtension, origin: string): Promise<string[]> {
+  const res = assertOk(await callBackground(ext, { type: 'enableSite', origin }), 'enableSite');
+  if (res.type !== 'enableSite') throw new Error(`jev-duo e2e: unexpected enableSite response ${res.type}`);
+  return res.genericSites;
+}
+
+/** The inverse: unregisters the origin's dynamic content script and drops it from settings. */
+export async function disableSite(ext: LaunchedExtension, origin: string): Promise<string[]> {
+  const res = assertOk(await callBackground(ext, { type: 'disableSite', origin }), 'disableSite');
+  if (res.type !== 'disableSite') throw new Error(`jev-duo e2e: unexpected disableSite response ${res.type}`);
+  return res.genericSites;
+}
+
+/** Every content script this extension has dynamically registered in the REAL browser, read from the
+ * service worker (chrome.scripting is not reachable from a page). */
+export async function registeredContentScripts(ext: LaunchedExtension): Promise<chrome.scripting.RegisteredContentScript[]> {
+  const sw = ext.context.serviceWorkers()[0] ?? ext.sw;
+  return (await sw.evaluate(() => chrome.scripting.getRegisteredContentScripts())) as chrome.scripting.RegisteredContentScript[];
+}
+
 /** `http://127.0.0.1:4173/x.html?jd-platform=x` — the query param makes `pickAdapter` choose the
  * site adapter that the fixture's markup was copied from. */
 export function fixtureUrl(site: 'x' | 'reddit' | 'hn'): string {
