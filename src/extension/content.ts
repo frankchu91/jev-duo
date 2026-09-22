@@ -25,14 +25,24 @@ const SEEN_HEARTBEAT_MS = 30_000;
  * tweetText) gets re-extracted on every single MutationObserver scan for as long as it stays in the
  * DOM — unbounded, since findPosts() is idempotent and keeps returning it every time. */
 const MAX_EXTRACT_ATTEMPTS = 5;
-/** How long after a scan that found nothing before this script looks again on its own. Every other
- * scan is reactive — a DOM mutation or a visibility change — so a page that renders its feed once and
- * then goes quiet (an SPA committing its first render a second after document_idle, with the adapter
- * throttled to nothing on that one call) would have no second chance at all: the mutation that would
- * have triggered the rescan is the very one that got throttled. One pending retry at a time, armed
- * only while the page has produced no posts whatsoever, so a page that IS producing posts is still
- * driven entirely by its mutations. Matched to the generic adapter's own full-scan interval, so the
- * retry always gets a real scan rather than another throttled no-op. */
+/** How long after a scan that found no feed before this script looks again on its own. Every other
+ * scan is reactive — a DOM mutation or a visibility change — so a page whose feed renders in one
+ * commit, with the adapter's full-scan throttle spending that call on an empty result, has no second
+ * chance at all: the mutation that would have triggered the rescan is the very one that got throttled.
+ * Two shapes hit this, which is why the retry is armed whenever the page currently shows no feed
+ * rather than only while it has never produced one:
+ *   - first render late (an SPA committing a second after document_idle, nothing judged yet);
+ *   - feed REPLACED (an in-app navigation removes the old feed, which detaches the generic adapter's
+ *     cached parent and so forces a full scan that finds nothing AND restarts the throttle window;
+ *     the new view then renders inside that window and is thrown away).
+ * One pending retry at a time, never armed while a scan is finding posts (`found.length > 0` then),
+ * cleared in `stop()`. Matched to the generic adapter's own full-scan interval, so the retry always
+ * gets a real scan rather than another throttled no-op.
+ *
+ * Accepted cost: a page showing no feed — empty from the start, or emptied by a navigation that never
+ * renders another one — pays one scan every 5 s for as long as it stays empty and open. That is the
+ * same bounded budget the adapter's own time-based throttle already permits, and far less than the
+ * per-mutation full scan this whole throttle exists to remove. */
 const EMPTY_RESCAN_MS = 5000;
 
 interface Pending { el: Element; targets: Element[]; item: Item }
@@ -169,9 +179,10 @@ export function startContentScript(
         // one broken post must not stop the rest of the scan, or be marked seen (so it never recovers)
       }
     }
-    // Nothing found, and nothing ever found here: give the page one more look on our own (see
-    // EMPTY_RESCAN_MS). Re-armed by each empty scan, never while a scan is finding posts.
-    if (found.length === 0 && seenCount === 0) armRescan();
+    // No feed in front of us right now — whether or not this page has produced posts before — so give
+    // it another look on our own (see EMPTY_RESCAN_MS). Re-armed by each empty scan; a scan that finds
+    // posts arms nothing, and the page goes back to being driven by its own mutations.
+    if (found.length === 0) armRescan();
   }
 
   /** Arms the single pending self-rescan, if one isn't already armed. */

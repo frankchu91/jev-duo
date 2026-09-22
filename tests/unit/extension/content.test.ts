@@ -304,12 +304,14 @@ describe('startContentScript', () => {
     expect(reports()).toHaveLength(3); // the interval is cleared with everything else
   });
 
-  // Fix round 2, IMPORTANT: every other scan is reactive (a mutation, a visibility change), and the
-  // generic adapter now throttles a no-feed scan — so an SPA that commits its feed once, a second
-  // after document_idle, can strand itself: the one call it makes returns nothing, the mutation that
-  // would have rescanned is the very one that got throttled, and nothing ever looks again. The stub
-  // below reproduces exactly that shape (two empty findPosts calls, then a real feed) with NO
-  // mutations dispatched at all, so only a self-armed rescan can get the page judged.
+  // Fix round 2/3, IMPORTANT: every other scan is reactive (a mutation, a visibility change), and the
+  // generic adapter throttles a no-feed scan — so a page whose feed renders in one commit can strand
+  // itself: the one call it makes returns nothing, the mutation that would have rescanned is the very
+  // one that got throttled, and nothing ever looks again. Two shapes do this — a late FIRST render,
+  // and a feed REPLACED by an in-app navigation (which detaches the adapter's cached parent, forcing a
+  // full scan that finds nothing and restarts the throttle window the new view then renders inside).
+  // Every test here dispatches no mutation for the render it is waiting on, so only a self-armed
+  // rescan can get the page judged.
   describe('self-rescan after an empty scan', () => {
     /** Makes `findPosts` return nothing for its first `emptyCalls` calls and the real feed after,
      * and counts the calls. */
@@ -351,6 +353,74 @@ describe('startContentScript', () => {
       const afterFeed = findCalls();
       await vi.advanceTimersByTimeAsync(30_000);
       expect(findCalls()).toBe(afterFeed);
+
+      script.stop();
+    });
+
+    // Fix round 3: the retry used to be armed only while `seenCount === 0`, which missed the shape
+    // above — a page that HAS produced posts, then loses its feed to an in-app navigation, and whose
+    // replacement feed renders inside the throttle window the empty scan just restarted.
+    it('re-scans 5s after a feed disappears, so the next view is judged even though it never mutates again', async () => {
+      vi.useFakeTimers();
+      const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+      const real = xAdapter.findPosts;
+      const firstView = real(doc);
+      const column = doc.querySelector('[data-testid="primaryColumn"]')!;
+      // The next view's posts, with ids of their own. They sit in the document from the start so that
+      // their "arrival" costs no mutation: what hides them until the navigation is the stub below.
+      const secondView = firstView.map((el, i) => {
+        const clone = el.cloneNode(true) as Element;
+        for (const a of clone.querySelectorAll('a[href*="/status/"]')) a.setAttribute('href', `/second/status/19000000000000000${i}`);
+        column.appendChild(clone);
+        return clone;
+      });
+
+      let view: Element[] = firstView;
+      let calls = 0;
+      vi.spyOn(xAdapter, 'findPosts').mockImplementation(() => {
+        calls += 1;
+        return view;
+      });
+
+      const requests: Request[] = [];
+      const script = runContentScript(doc, loc, makeFakeSend((req) => requests.push(req)));
+      const judges = (): Request[] => requests.filter((c) => c.type === 'judge');
+      await vi.advanceTimersByTimeAsync(200); // the first view is judged and its decisions mounted
+      expect(script.seen()).toBe(6);
+      expect(judges()).toHaveLength(1);
+
+      // In-app navigation: the old feed is gone. One mutation drives that scan, as the real observer
+      // would — and it is the LAST mutation this page ever sees.
+      view = [];
+      const callsBeforeNavigation = calls;
+      doc.body.appendChild(doc.createComment('the old view was torn down'));
+      await vi.advanceTimersByTimeAsync(50);
+      expect(calls).toBe(callsBeforeNavigation + 1);
+      expect(judges()).toHaveLength(1); // nothing found, nothing judged
+
+      // The new view renders, in one commit, with no mutation delivered to us at all.
+      view = secondView;
+      await vi.advanceTimersByTimeAsync(5000); // only the self-armed rescan can find it
+      expect(script.seen()).toBe(12);
+
+      await vi.advanceTimersByTimeAsync(200); // the judge debounce
+      const judged = judges();
+      expect(judged).toHaveLength(2);
+      if (judged[1].type === 'judge') {
+        expect(judged[1].items.map((i) => i.id)).toEqual([
+          'x:190000000000000000',
+          'x:190000000000000001',
+          'x:190000000000000002',
+          'x:190000000000000003',
+          'x:190000000000000004',
+          'x:190000000000000005',
+        ]);
+      }
+
+      // A feed is in front of us again, so nothing is armed: back to mutation-driven scanning.
+      const afterSecondView = calls;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(calls).toBe(afterSecondView);
 
       script.stop();
     });
