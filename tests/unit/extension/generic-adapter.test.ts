@@ -18,6 +18,23 @@ function parse(html: string): Document {
   return new DOMParser().parseFromString(`<html><body>${html}</body></html>`, 'text/html');
 }
 
+/** A page with no feed at all: the only repeated-tag sibling groups (4 `<h2>`s, 4 `<p>`s) are both far
+ * short of MIN_TEXT, so every scan of it returns nothing. Used twice below — once for the fail-closed
+ * result, once for the no-cache throttle that keeps a page like this from being re-scanned forever. */
+const DOCS_PAGE = `
+  <header><h1>Getting Started</h1></header>
+  <article>
+    <h2>Installation</h2>
+    <p>See installation steps below.</p>
+    <h2>Configuration</h2>
+    <p>Config lives in a yaml file.</p>
+    <h2>Usage</h2>
+    <p>Run with --config set.</p>
+    <h2>FAQ</h2>
+    <p>Check the FAQ page.</p>
+  </article>
+`;
+
 describe('genericAdapter', () => {
   // `__generic` is the fix-round-2 test hook (clock override + cache reset) for the full-scan throttle;
   // every test starts from a clean cache and the real clock, regardless of what an earlier test did.
@@ -42,6 +59,18 @@ describe('genericAdapter', () => {
     expect(posts.every((el) => el.classList.contains('status'))).toBe(true);
     expect(posts.some((el) => el.classList.contains('quoted'))).toBe(false);
     expect(posts.some((el) => el.closest('nav'))).toBe(false);
+  });
+
+  // Fix wave, C2 (spec §3.4): "outermost only" is a structural guarantee, not a filter — every member
+  // of a group is a direct child of the same parent, so no returned element can contain another. The
+  // O(n^2) `outermost()` pass that used to re-check this on every call is gone; this test is what keeps
+  // the invariant honest.
+  it('never returns a post contained inside another (outermost-only holds by construction)', () => {
+    const doc = loadDoc('generic.html');
+    const posts = genericAdapter.findPosts(doc);
+    expect(posts).toHaveLength(6);
+    const nested = posts.filter((el) => posts.some((other) => other !== el && other.contains(el)));
+    expect(nested).toEqual([]);
   });
 
   // (b) extraction fields, id stability, author, hasMedia/hasLink/url.
@@ -70,6 +99,22 @@ describe('genericAdapter', () => {
       const flags = posts.map((el) => genericAdapter.extract(el)?.meta?.hasLink ?? false);
       expect(flags).toEqual([false, false, false, false, true, false]);
       expect(genericAdapter.extract(posts[4])?.url).toBe('https://eng.example.com/retro');
+    });
+
+    // Fix wave, A/minor: the author's OWN link (a profile card that wraps the handle in an <a>) is not
+    // the post's url. Skipping only the author element itself left the wrapper case broken, since the
+    // matched author element is then the wrapper and the link inside it is a different node.
+    it('url skips a link nested inside the author element, not just the author element itself', () => {
+      const doc = parse(`
+        <article class="post">
+          <div class="author-card"><a href="https://social.example/users/alice">Alice Ackerman</a></div>
+          <p>A real post body with plenty of genuinely visible text to clear the forty character minimum.</p>
+          <a href="https://blog.example/the-post">read the whole thing</a>
+        </article>
+      `);
+      const item = genericAdapter.extract(doc.querySelector('.post')!);
+      expect(item?.author).toBe('Alice Ackerman'); // the wrapper matched [class*="author" i], not the <a>
+      expect(item?.url).toBe('https://blog.example/the-post');
     });
 
     it('url falls back to location.href for posts with no external link', () => {
@@ -164,19 +209,7 @@ describe('genericAdapter', () => {
   // (d) a documentation page: the only repeated-tag sibling groups (4 <h2>s, 4 <p>s) are both far short
   // of MIN_TEXT, so nothing qualifies and findPosts fails closed to zero.
   it('finds nothing on a documentation page with no group of >= 4 similar, substantial siblings', () => {
-    const doc = parse(`
-      <header><h1>Getting Started</h1></header>
-      <article>
-        <h2>Installation</h2>
-        <p>See installation steps below.</p>
-        <h2>Configuration</h2>
-        <p>Config lives in a yaml file.</p>
-        <h2>Usage</h2>
-        <p>Run with --config set.</p>
-        <h2>FAQ</h2>
-        <p>Check the FAQ page.</p>
-      </article>
-    `);
+    const doc = parse(DOCS_PAGE);
     expect(genericAdapter.findPosts(doc)).toEqual([]);
   });
 
@@ -360,5 +393,51 @@ describe('genericAdapter', () => {
       genericAdapter.findPosts(doc);
       expect(spy).toHaveBeenCalledTimes(1);
     });
+
+    // Fix wave, C1 (spec §3.5): the throttle used to apply only to a HEALTHY CACHED parent, so a page
+    // with no qualifying feed at all — no cache to protect — full-scanned the whole document on every
+    // MutationObserver rescan, for as long as the tab stayed open. The same 20-call / 5000ms budget now
+    // covers the no-cache case, with the very first call (fresh counters) still scanning.
+    it('a page with no qualifying feed scans once in 20 calls, and again on the 21st', () => {
+      const doc = parse(DOCS_PAGE);
+      let clock = 1_000_000;
+      __generic.now = () => clock;
+      const spy = vi.spyOn(doc, 'querySelectorAll');
+
+      for (let i = 0; i < 20; i++) expect(genericAdapter.findPosts(doc)).toEqual([]);
+      expect(spy).toHaveBeenCalledTimes(1); // the first call; the other 19 never touched the document
+
+      expect(genericAdapter.findPosts(doc)).toEqual([]); // the 21st
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it('a page with no qualifying feed re-scans once the injected clock passes 5000ms', () => {
+      const doc = parse(DOCS_PAGE);
+      let clock = 1_000_000;
+      __generic.now = () => clock;
+      const spy = vi.spyOn(doc, 'querySelectorAll');
+
+      expect(genericAdapter.findPosts(doc)).toEqual([]); // fresh counters: scans
+      expect(genericAdapter.findPosts(doc)).toEqual([]); // throttled
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      clock += 5000;
+      expect(genericAdapter.findPosts(doc)).toEqual([]);
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Fix wave, I5: qualification, the median and the tie-break total used to walk every candidate's
+  // subtree separately — three full visible-text walks per member per scan. One memo per `scan()` call
+  // makes it one, which is what this counts: 6 candidates in one group, 6 walks.
+  it('walks each candidate member\'s visible text exactly once per scan', () => {
+    const items = Array.from(
+      { length: 6 },
+      (_, i) => `<li class="item">Feed item number ${'abcdef'[i]} with plenty of genuinely visible text to clear the minimum.</li>`,
+    ).join('');
+    const doc = parse(`<ul class="feed">${items}</ul>`);
+
+    expect(genericAdapter.findPosts(doc)).toHaveLength(6);
+    expect(__generic.textWalks()).toBe(6); // 6, not 18: one walk per member, not one per reader
   });
 });

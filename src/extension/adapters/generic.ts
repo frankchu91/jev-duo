@@ -17,9 +17,12 @@ const SKIPPED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
 // `\b` after none/hidden rejects "display:nonesuch"/"visibility:hiddenpopup" while still matching
 // "display: none !important" (a boundary sits between "e" and " "/end-of-string either way).
 const HIDDEN_STYLE = /display\s*:\s*none\b|visibility\s*:\s*hidden\b/i;
-// Full-scan throttle (spec §3.5): once the cached parent is attached and healthy, a full document scan
-// (the only way to discover a DIFFERENT, competing group) runs at most this often; every call in between
-// returns the cheap per-parent recount instead.
+// Full-scan throttle (spec §3.5): a full document scan is the only way to discover a group other than
+// the cached one — and, on a page with no cache at all, the only way to discover a first one — so it
+// runs at most this often. Every call in between is either the cheap per-parent recount (a healthy
+// cached parent) or nothing at all (no cache: the page had no qualifying feed the last time we looked,
+// and a documentation page stays a documentation page). A detached or thinned cached parent bypasses
+// the throttle entirely.
 const FULL_SCAN_EVERY_CALLS = 20;
 const FULL_SCAN_MIN_INTERVAL_MS = 5000;
 
@@ -32,6 +35,10 @@ function isHidden(el: Element): boolean {
   );
 }
 
+/** Counts `visibleText` calls since the last `__generic.reset()`; read only by the unit test that
+ * pins down "each element's text is walked once per scan" (see `scan`'s memo below). */
+let textWalks = 0;
+
 // Visible text (spec §3.2): `root`'s text minus script/style/noscript/template subtrees and minus any
 // hidden/aria-hidden/inline-hidden element's subtree. Iterative (an explicit stack of {nodes, i} frames,
 // not recursion) so an unusually deep chain of wrapper elements can't blow the call stack; each frame
@@ -40,6 +47,7 @@ function isHidden(el: Element): boolean {
 // computed visibility. Every reader of text — qualification, the median/tie-break in `scan`, and
 // `extract`'s `text` field — goes through `collapsedText` below.
 function visibleText(root: Element): string {
+  textWalks += 1;
   if (isHidden(root)) return '';
   const parts: string[] = [];
   const stack: Array<{ nodes: NodeListOf<ChildNode>; i: number }> = [{ nodes: root.childNodes, i: 0 }];
@@ -84,13 +92,14 @@ function contains(root: ParentNode, el: Element): boolean {
   return (root as unknown as Node).contains(el);
 }
 
-// Direct children of `parent` sharing `signature`, dropping any inside a landmark — applied here (not
-// just on return) so a landmarked group can never accumulate enough members to qualify at all.
+/** Direct children of `parent` sharing `signature`. The landmark rule is applied to `parent` itself by
+ * both callers (see `scan` and `findPosts`): members are direct children, so they sit inside a landmark
+ * exactly when their parent does, and one `closest` per parent replaces one per child. */
 function siblingsOf(parent: Element, signature: string): Element[] {
-  return [...parent.children].filter((c) => !isLandmarked(c) && signatureOf(c) === signature);
+  return [...parent.children].filter((c) => signatureOf(c) === signature);
 }
-function qualifying(members: Element[]): Element[] {
-  return members.filter((el) => collapsedText(el).length >= MIN_TEXT);
+function qualifying(members: Element[], textOf: (el: Element) => string = collapsedText): Element[] {
+  return members.filter((el) => textOf(el).length >= MIN_TEXT);
 }
 
 interface Group { parent: Element; signature: string; members: Element[] }
@@ -100,11 +109,27 @@ interface Group { parent: Element; signature: string; members: Element[] }
 function scan(root: ParentNode): Group | undefined {
   let best: Group | undefined;
   let bestTotalText = -1;
+  // One visible-text walk per element per scan: qualification, the median and the tie-break total all
+  // read this memo instead of re-walking the same subtree three times, and `visibleText` is by far the
+  // most expensive thing this module does. Local to the call, so the next scan still sees text the page
+  // has changed in the meantime.
+  const texts = new Map<Element, string>();
+  const textOf = (el: Element): string => {
+    const memo = texts.get(el);
+    if (memo !== undefined) return memo;
+    const text = collapsedText(el);
+    texts.set(el, text);
+    return text;
+  };
+
   for (const parent of root.querySelectorAll('*')) {
     if (parent.children.length < MIN_SIBLINGS) continue;
+    // One `closest` for the whole candidate group rather than one per child: every member is a direct
+    // child of `parent`, so a landmarked parent is exactly a landmarked group. Applied here (not on
+    // return) so a landmarked group can never accumulate enough members to qualify at all.
+    if (isLandmarked(parent)) continue;
     const bySignature = new Map<string, Element[]>();
     for (const child of parent.children) {
-      if (isLandmarked(child)) continue;
       const sig = signatureOf(child);
       const list = bySignature.get(sig);
       if (list) list.push(child);
@@ -112,10 +137,13 @@ function scan(root: ParentNode): Group | undefined {
     }
     for (const [signature, members] of bySignature) {
       if (members.length < MIN_SIBLINGS) continue;
-      const qualified = qualifying(members);
+      const qualified = qualifying(members, textOf);
       if (qualified.length < MIN_SIBLINGS) continue;
-      if (median(members.map((el) => collapsedText(el).length)) < MIN_TEXT) continue;
-      const totalText = qualified.reduce((sum, el) => sum + collapsedText(el).length, 0);
+      if (median(members.map((el) => textOf(el).length)) < MIN_TEXT) continue;
+      const totalText = qualified.reduce((sum, el) => sum + textOf(el).length, 0);
+      // INVARIANT (spec §3.4): every member of a group is a DIRECT child of the same `parent`, so no
+      // member can ever contain another — "outermost only" holds by construction here, which is why
+      // nothing downstream filters for it.
       if (!best || qualified.length > best.members.length || (qualified.length === best.members.length && totalText > bestTotalText)) {
         best = { parent, signature, members: qualified };
         bestTotalText = totalText;
@@ -123,10 +151,6 @@ function scan(root: ParentNode): Group | undefined {
     }
   }
   return best;
-}
-// Excludes any member contained inside another (direct siblings never nest; mirrors x.ts's outermostTweets).
-function outermost(members: Element[]): Element[] {
-  return members.filter((el) => !members.some((other) => other !== el && other.contains(el)));
 }
 function authorElementOf(el: Element): Element | undefined {
   for (const sel of AUTHOR_SELECTORS) {
@@ -140,15 +164,18 @@ let cache: { parent: Element; signature: string; count: number } | undefined;
 let callsSinceFullScan = 0;
 let lastFullScanAt = 0;
 
-/** Test hook: an overridable clock (production always uses Date.now()) and a way to clear the module's
- * cache/throttle state between tests, so the full-scan throttle can be driven deterministically instead
- * of waiting on real wall-clock time. Not read or written by content.ts or any production code path. */
+/** Test hook: an overridable clock (production always uses Date.now()), the visible-text walk counter,
+ * and a way to clear the module's cache/throttle state between tests, so the full-scan throttle can be
+ * driven deterministically instead of waiting on real wall-clock time. Not read or written by
+ * content.ts or any production code path. */
 export const __generic = {
   now: (): number => Date.now(),
+  textWalks: (): number => textWalks,
   reset(): void {
     cache = undefined;
     callsSinceFullScan = 0;
     lastFullScanAt = 0;
+    textWalks = 0;
   },
 };
 
@@ -158,7 +185,7 @@ function adopt(found: Group | undefined): Element[] {
     return [];
   }
   cache = { parent: found.parent, signature: found.signature, count: found.members.length };
-  return outermost(found.members);
+  return found.members;
 }
 
 // A full scan is the only way to discover a group other than the cached one; every call site that
@@ -169,26 +196,37 @@ function fullScan(root: ParentNode): Group | undefined {
   return scan(root);
 }
 
+/** Counts this call and reports whether a full scan is due. Fresh counters (`lastFullScanAt === 0`)
+ * always report due, so the very first call on a page always scans. */
+function fullScanDue(): boolean {
+  callsSinceFullScan += 1;
+  return callsSinceFullScan >= FULL_SCAN_EVERY_CALLS || __generic.now() - lastFullScanAt >= FULL_SCAN_MIN_INTERVAL_MS;
+}
+
 export const genericAdapter: Adapter = {
   platform: 'generic',
   matches: () => true,
   findPosts(root) {
-    if (!cache) return adopt(fullScan(root));
+    // The throttle is consulted BEFORE the cache branch: a page with no qualifying feed (a docs page,
+    // an app shell, a feed that hasn't rendered yet) has no cached parent to recount cheaply, and used
+    // to pay a full document scan on every single MutationObserver rescan for as long as the tab
+    // stayed open. It now scans on the first call and thereafter at most once every 20 calls / 5s.
+    const due = fullScanDue();
+    if (!cache) return due ? adopt(fullScan(root)) : [];
 
-    const attached = contains(root, cache.parent);
-    const own = attached ? qualifying(siblingsOf(cache.parent, cache.signature)) : [];
-    // The cached group is a baseline worth protecting only while it's both attached and still qualifies
-    // on its own (spec §3.5); once it's gone or has thinned below MIN_SIBLINGS, a full scan runs right
-    // away (no throttle) and the next qualifying group found anywhere is adopted regardless of size.
-    if (!attached || own.length < MIN_SIBLINGS) return adopt(fullScan(root));
+    const usable = contains(root, cache.parent) && !isLandmarked(cache.parent);
+    const own = usable ? qualifying(siblingsOf(cache.parent, cache.signature)) : [];
+    // The cached group is a baseline worth protecting only while it's both attached (and still outside
+    // any landmark) and still qualifies on its own (spec §3.5); once it's gone or has thinned below
+    // MIN_SIBLINGS, a full scan runs right away (no throttle) and the next qualifying group found
+    // anywhere is adopted regardless of size.
+    if (!usable || own.length < MIN_SIBLINGS) return adopt(fullScan(root));
 
     // Healthy and attached: the cheap recount above already reflects this parent's current children, so
     // a full scan is only needed often enough to catch a dramatically larger competing group elsewhere.
-    callsSinceFullScan += 1;
-    const due = callsSinceFullScan >= FULL_SCAN_EVERY_CALLS || __generic.now() - lastFullScanAt >= FULL_SCAN_MIN_INTERVAL_MS;
     if (!due) {
       cache.count = own.length;
-      return outermost(own);
+      return own;
     }
 
     // A DIFFERENT group at least twice the cached size displaces it, to avoid flapping.
@@ -197,7 +235,7 @@ export const genericAdapter: Adapter = {
       return adopt(found);
     }
     cache.count = own.length;
-    return outermost(own);
+    return own;
   },
   extract(el) {
     const text = collapsedText(el).slice(0, TEXT_MAX);
@@ -207,7 +245,9 @@ export const genericAdapter: Adapter = {
     const author = authorEl ? collapsedText(authorEl).slice(0, 60) : undefined;
 
     const httpLinks = [...el.querySelectorAll('a[href^="http"]')];
-    const linkEl = httpLinks.find((a) => a !== authorEl);
+    // Any link INSIDE the author block (a profile card wrapping the handle in an <a>) is the author's,
+    // not the post's — `contains` is true for the element itself, so this covers `a === authorEl` too.
+    const linkEl = httpLinks.find((a) => !authorEl?.contains(a));
     const url = linkEl?.getAttribute('href') ?? location.href;
     const meta: ItemMeta = { hasLink: httpLinks.length > 0, hasMedia: !!el.querySelector('img, video, picture') };
     return { id, platform: 'generic', author, text, url, meta };
