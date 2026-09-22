@@ -208,8 +208,10 @@ describe('pickAdapter', () => {
     expect(pickAdapter(new URL('https://news.ycombinator.com/'))?.platform).toBe('hn');
   });
 
-  it('returns undefined for an unrelated site', () => {
-    expect(pickAdapter(new URL('https://example.com/'))).toBeUndefined();
+  // Spec §3: genericAdapter.matches is unconditionally true, so it is the fallback for any URL none of
+  // the three built-ins claim — pickAdapter can no longer return undefined for a real URL.
+  it('falls back to the generic adapter for an unrelated site', () => {
+    expect(pickAdapter(new URL('https://example.com/'))?.platform).toBe('generic');
   });
 
   it('ignores an unrecognized jd-platform value and falls back to hostname matching', () => {

@@ -61,6 +61,7 @@ const SETTINGS: Settings = {
   strictness: 0.5,
   arbiter: true,
   enabledSites: { x: true, reddit: true, hn: true },
+  genericSites: [],
 };
 
 const STATS: DuoStats = {

@@ -214,7 +214,7 @@ interface BootDeps {
 export async function boot(deps: BootDeps): Promise<void> {
   const adapter = pickAdapter(new URL(deps.loc.href));
   if (!adapter) return;
-  const res = await deps.send({ type: 'isSiteEnabled', platform: adapter.platform });
+  const res = await deps.send({ type: 'isSiteEnabled', platform: adapter.platform, origin: deps.loc.origin });
   if (!res.ok || res.type !== 'isSiteEnabled') return; // can't confirm enabled: stay out of the way
   if (!res.enabled) return;
   deps.start(deps.doc, deps.loc, { send: deps.send });

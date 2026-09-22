@@ -8,6 +8,12 @@ import type { Example, Item, QuestionPack, Verdict } from '../core/types';
 
 export type SiteId = 'x' | 'reddit' | 'hn';
 
+/** Every platform a content script can report itself as: the three built-ins plus `generic` (the
+ * fallback adapter). Distinct from `SiteId`, which stays the three built-ins only — the popup's
+ * per-site toggles (`Settings.enabledSites`) are keyed by `SiteId` and never gain a `generic` entry;
+ * generic sites are gated by origin (`Settings.genericSites`) instead. */
+export type PagePlatform = SiteId | 'generic';
+
 export interface Settings {
   providerMode: 'mock' | 'openrouter' | 'typesafe'; // typesafe implies anthropic for llm if key present, else mock llm
   keys: { openrouter?: string; typesafe?: string; anthropic?: string };
@@ -17,6 +23,7 @@ export interface Settings {
   strictness: number; // 0..1, default 0.5
   arbiter: boolean; // default true
   enabledSites: Record<SiteId, boolean>; // default all true
+  genericSites: string[]; // origins (e.g. "https://mastodon.social") the user opted the generic adapter into; default []
   mockFixtures?: Record<string, Record<string, number>>; // test hook
 }
 
@@ -27,6 +34,7 @@ export const DEFAULT_SETTINGS: Settings = {
   strictness: 0.5,
   arbiter: true,
   enabledSites: { x: true, reddit: true, hn: true },
+  genericSites: [],
 };
 
 /** The slice of `chrome.runtime.MessageSender` the background actually reads. A message from a tab
@@ -42,7 +50,7 @@ export interface Sender {
 /** One content script's report of how many posts its adapter found on the page it runs in. */
 export interface PageSeenReport {
   tabId: number;
-  platform: SiteId;
+  platform: PagePlatform;
   seen: number;
   at: string;
 }
@@ -53,8 +61,11 @@ export type Request =
   | { type: 'recompile' }
   | { type: 'feedback'; example: Example }
   | { type: 'getState' }
-  | { type: 'isSiteEnabled'; platform: SiteId }
-  | { type: 'pageSeen'; platform: SiteId; seen: number }
+  // `origin` (the page's `location.origin`) is how the generic adapter is gated: a built-in platform
+  // ignores it, but `platform: 'generic'` is only ever answered `true` when the origin is in
+  // `settings.genericSites` (see background.ts). Optional because the three built-ins don't need it.
+  | { type: 'isSiteEnabled'; platform: PagePlatform; origin?: string }
+  | { type: 'pageSeen'; platform: PagePlatform; seen: number }
   | { type: 'setSettings'; patch: Partial<Settings> }
   | { type: 'resetStats' };
 

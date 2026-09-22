@@ -55,13 +55,17 @@ afterEach(() => {
 });
 
 describe('startContentScript', () => {
-  it('is a no-op when the URL matches no adapter (never calls send)', () => {
-    const { doc } = loadDoc('x.html');
+  // genericAdapter is now a universal fallback (spec §3: `matches` is unconditionally true), so
+  // startContentScript itself has no "no adapter matched" no-op left to test — that gate lives entirely
+  // in boot()/isSiteEnabled (see the `boot` describe block below). This proves the generic adapter
+  // drives the same scan pipeline as the built-ins once actually started.
+  it('runs the generic adapter (no gate of its own) on a URL no built-in adapter matches', () => {
+    const { doc, loc } = loadDoc('generic.html');
     const send = makeFakeSend();
-    const script = runContentScript(doc, { href: 'https://example.com/' } as Location, send);
-    expect(script.seen()).toBe(0);
+    const script = runContentScript(doc, loc, send);
+    expect(script.seen()).toBe(6);
     script.stop();
-    expect(send).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalled();
   });
 
   it('batches every post found on the initial scan into a single judge call and mounts the expected folds', async () => {
@@ -368,6 +372,16 @@ describe('boot', () => {
     expect(send).toHaveBeenCalledWith({ type: 'isSiteEnabled', platform: 'x' });
   });
 
+  // Spec §4: the generic adapter is gated per origin, so boot must forward `location.origin` — the
+  // built-in platforms above never rely on it (their `loc` fakes omit `.origin` entirely).
+  it('sends the page origin along with the platform, for a generic (non-built-in) site', async () => {
+    const { doc } = loadDoc('x.html');
+    const loc = { href: 'https://mastodon.social/home', origin: 'https://mastodon.social' } as Location;
+    const send = makeIsSiteEnabledSend(true);
+    await boot({ doc, loc, send: asSend(send), start: vi.fn() });
+    expect(send).toHaveBeenCalledWith({ type: 'isSiteEnabled', platform: 'generic', origin: 'https://mastodon.social' });
+  });
+
   it('does not call start when the platform is disabled', async () => {
     const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
     const send = makeIsSiteEnabledSend(false);
@@ -393,12 +407,15 @@ describe('boot', () => {
     expect(start).toHaveBeenCalledWith(doc, loc, { send: asSend(send) });
   });
 
-  it('is a no-op (never asks the background anything) when the URL matches no adapter', async () => {
+  // genericAdapter is now a universal fallback (spec §3), so an unrecognized URL is no longer
+  // special-cased to skip the ask entirely — it goes through the exact same isSiteEnabled gate as any
+  // built-in platform, just as platform:'generic', and stays inert precisely when that gate says no.
+  it('still asks isSiteEnabled (as platform generic) for a URL no built-in adapter matches, and stays inert when disabled', async () => {
     const { doc } = loadDoc('x.html');
-    const send = makeIsSiteEnabledSend(true);
+    const send = makeIsSiteEnabledSend(false);
     const start = vi.fn();
     await boot({ doc, loc: { href: 'https://example.com/' } as Location, send: asSend(send), start });
-    expect(send).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith({ type: 'isSiteEnabled', platform: 'generic', origin: undefined });
     expect(start).not.toHaveBeenCalled();
   });
 });

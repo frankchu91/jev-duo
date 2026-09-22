@@ -23,7 +23,7 @@ import { ExampleStore } from '../core/learner';
 import { resolveProviders } from '../core/providers/resolve';
 import type { JevProvider, LlmProvider } from '../core/providers/types';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
-import type { PageSeenReport, Request, Response, Sender, Settings, SiteId } from './messages';
+import type { PagePlatform, PageSeenReport, Request, Response, Sender, Settings } from './messages';
 import { loadExamples, loadPageSeen, loadSettings, loadStats, loadVerdicts, MAX_PAGE_REPORTS, MAX_VERDICTS, saveExamples, savePageSeen, saveSettings, saveStats, saveVerdicts } from './storage';
 
 interface Resolved {
@@ -102,7 +102,7 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
   // least recently reporting tab. Mirrored to chrome.storage.session (and re-read by init) because
   // Chrome evicts an idle service worker after ~30 seconds, and the report the popup most needs —
   // "this page produced no posts at all" — would otherwise vanish with it.
-  const pageSeen = new Map<number, { platform: SiteId; seen: number; at: string }>();
+  const pageSeen = new Map<number, { platform: PagePlatform; seen: number; at: string }>();
 
   // Tracks every judge() call currently in flight (from just before it starts until its stats/cache
   // are persisted), so a rebuild can wait for the set to drain instead of racing it.
@@ -288,7 +288,7 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
    * once the cap is reached (delete-then-set keeps insertion order == recency), and mirrors the
    * result to session storage so it outlives this service worker. A failed mirror write is logged
    * and swallowed: the live map is still correct, and losing a report is not worth failing on. */
-  async function recordPageSeen(tabId: number, platform: SiteId, seen: number): Promise<void> {
+  async function recordPageSeen(tabId: number, platform: PagePlatform, seen: number): Promise<void> {
     pageSeen.delete(tabId);
     pageSeen.set(tabId, { platform, seen, at: new Date().toISOString() });
     while (pageSeen.size > MAX_PAGE_REPORTS) {
@@ -319,9 +319,16 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
         return enqueueMutation(() => handleFeedback(req.example));
       case 'getState':
         return { ok: true, type: 'getState', settings, stats: agent.stats(), exampleCount: agent.examples.size, hasKeys, providers, pageSeen: pageSeenReports() };
-      case 'isSiteEnabled':
+      case 'isSiteEnabled': {
+        const { platform } = req;
+        // A generic origin is opt-in and off by default (fail-closed): enabled only once the user's
+        // origin is exactly in genericSites. The three built-ins keep their existing default-on gate.
+        if (platform === 'generic') {
+          return { ok: true, type: 'isSiteEnabled', enabled: req.origin !== undefined && settings.genericSites.includes(req.origin) };
+        }
         // The only state a page context may ask for, and deliberately one boolean wide.
-        return { ok: true, type: 'isSiteEnabled', enabled: settings.enabledSites[req.platform] !== false };
+        return { ok: true, type: 'isSiteEnabled', enabled: settings.enabledSites[platform] !== false };
+      }
       case 'pageSeen':
         // No tab id (e.g. driven through the test hook rather than onMessage): nothing to key on, so
         // the report is acknowledged and dropped rather than failing the content script's send.

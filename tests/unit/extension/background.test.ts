@@ -536,6 +536,37 @@ describe('background', () => {
       expect(await bg.handle({ type: 'isSiteEnabled', platform: 'x' })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: false });
       expect(await bg.handle({ type: 'isSiteEnabled', platform: 'reddit' })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: true });
     });
+
+    // Generic sites are opt-in and off by default (fail-closed), gated by origin rather than the
+    // enabledSites toggle the three built-ins use.
+    it('generic: false by default, with no origin or an origin not in genericSites', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic' })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: false });
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin: 'https://mastodon.social' })).toEqual({
+        ok: true,
+        type: 'isSiteEnabled',
+        enabled: false,
+      });
+    });
+
+    it('generic: true only for an origin exactly present in settings.genericSites', async () => {
+      await chrome.storage.local.set({ settings: { genericSites: ['https://mastodon.social'] } });
+      const bg = createBackground();
+      await bg.ready;
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin: 'https://mastodon.social' })).toEqual({
+        ok: true,
+        type: 'isSiteEnabled',
+        enabled: true,
+      });
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'generic', origin: 'https://other.example' })).toEqual({
+        ok: true,
+        type: 'isSiteEnabled',
+        enabled: false,
+      });
+      // The built-ins are unaffected by genericSites.
+      expect(await bg.handle({ type: 'isSiteEnabled', platform: 'x' })).toEqual({ ok: true, type: 'isSiteEnabled', enabled: true });
+    });
   });
 
   // The keys in `Settings` must not be reachable from a page's world. getState carries them, so it is

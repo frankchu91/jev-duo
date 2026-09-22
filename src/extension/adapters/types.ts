@@ -11,7 +11,7 @@ export interface FoldHandlers {
 }
 
 export interface Adapter {
-  platform: 'x' | 'reddit' | 'hn';
+  platform: 'x' | 'reddit' | 'hn' | 'generic';
   /** Whether this adapter should run on `url` (hostname match; `pickAdapter` layers the `jd-platform`
    * test override on top of this). */
   matches(url: URL): boolean;
