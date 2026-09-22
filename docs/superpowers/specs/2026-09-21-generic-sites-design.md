@@ -43,9 +43,12 @@ safe).
    at least 40.
 3. Among qualifying groups choose the one with the largest number of
    qualifying members; ties go to the largest total text.
-4. Return the qualifying members of that group, excluding any element that
-   is contained inside another returned element (outermost only), and any
-   element inside `nav`, `header`, `footer`, `aside`, `form`.
+4. Return the qualifying members of that group. Outermost-only holds *by
+   construction*, not by a filter: every member of a group is a direct child
+   of the same parent, so no member can contain another, and nothing
+   downstream re-checks it. The landmark rule (`nav`, `header`, `footer`,
+   `aside`, `form`) is applied once to the candidate parent, which for the
+   same reason is equivalent to applying it to every member.
 5. Results are cached per parent for the lifetime of the page and refreshed
    on the observer's rescans (new siblings with the same signature are
    picked up). A different group replaces the cached one only while the
@@ -57,7 +60,13 @@ safe).
    cached parent stays attached and healthy, the (comparatively expensive)
    full scan that a replacement check needs is itself throttled to at most
    once every 20 calls or 5 seconds, whichever comes first — every call in
-   between is the cheap per-parent recount.
+   between is the cheap per-parent recount. The same budget covers the case
+   where there is nothing cached at all: a page whose scan found no feed
+   (a documentation page, an app shell) is re-scanned at most once every 20
+   calls or 5 seconds and returns nothing in between, rather than paying a
+   full document scan on every rescan for as long as the tab stays open —
+   while the very first call on a page always scans, and a detached or
+   thinned cached parent still scans immediately.
 
 **Extraction (`extract`)**: `text` = the element's text with whitespace
 collapsed, capped at 2000 chars; `null` when shorter than `MIN_TEXT`.
@@ -117,6 +126,11 @@ Unchanged: post text goes only to the configured provider, keys never reach
 content scripts, and the extension holds host permissions only for the
 three built-in sites plus the origins the user granted. Disabling a site
 revokes its permission.
+
+Disabling only unregisters the content script for *future* page loads: a tab
+that already loaded it keeps judging until it is reloaded, exactly mirroring
+the reload a newly enabled site needs. The popup says so (`disabled — reload
+the tab to stop judging`).
 
 ## 6. Testing
 

@@ -14,7 +14,7 @@
 
 - `pnpm typecheck && pnpm test && pnpm build && pnpm test:e2e` green after every task; every commit ends with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 - The three built-in adapters and their fixtures are untouched. `Adapter.platform` widens to `'x' | 'reddit' | 'hn' | 'generic'`; `SiteId` (the three popup toggles) stays as is; a new `PagePlatform = SiteId | 'generic'` is used by `isSiteEnabled` and `pageSeen`.
-- Heuristic constants (exact): `MIN_SIBLINGS = 4`, `MIN_TEXT = 40`, generated-class rule = contains a digit or longer than 24 chars, signature = tagName + first three surviving classes sorted, replacement rule = a new group replaces the cached one only with at least twice as many members, excluded ancestors = `nav, header, footer, aside, form`.
+- Heuristic constants (exact): `MIN_SIBLINGS = 4`, `MIN_TEXT = 40`, generated-class rule = contains a digit or longer than 24 chars, signature = tagName + the sorted class list truncated to the first three (sort first, then truncate — as the spec and `signatureOf` both do), replacement rule = a new group replaces the cached one only with at least twice as many members, excluded ancestors = `nav, header, footer, aside, form`.
 - Ids: `g:<fnv1a(location.host + text.slice(0, 500))>`; author capped at 60 chars; text capped at 2000.
 - Manifest after Task 2: `permissions: ["storage", "activeTab", "scripting"]`, `optional_host_permissions: ["https://*/*", "http://*/*"]`; static `content_scripts` and `host_permissions` unchanged.
 - Registered script id = `'jd-' + fnv1a(origin)` (decimal), `matches: [origin + '/*']`, `js: ['content.js']`, `css: ['styles.css']`, `runAt: 'document_idle'`, `persistAcrossSessions: true`.

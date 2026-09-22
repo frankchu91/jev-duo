@@ -9,5 +9,6 @@ coverage/
 .claude/
 test-results/
 playwright-report/
+.screenshots/
 tests/e2e/.profile/
 *.zip

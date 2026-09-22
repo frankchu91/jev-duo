@@ -3,9 +3,9 @@
 A two-brain agent that reads your feeds with you: an LLM writes the rules, Jev enforces them at
 roughly 100 ms per post.
 
-Works on x.com, reddit.com and news.ycombinator.com as a Chrome extension — plus any other feed-like
-site you enable from the popup, one origin at a time — and on the Hacker News front page (or any
-JSONL) from the terminal as `jev-duo`.
+Works on x.com, www.reddit.com and news.ycombinator.com as a Chrome extension — plus any other
+feed-like site you enable from the popup, one origin at a time — and on the Hacker News front page
+(or any JSONL) from the terminal as `jev-duo`.
 
 ## How it works
 
@@ -86,11 +86,15 @@ adapter that you switch on per site, from the popup's **This site** section:
    ever asks for the site in front of you, never for all sites.
 4. Reload the tab. A newly enabled site starts judging on its next load.
 
-The line under the button is the state you are in: `built in` on x.com, twitter.com, reddit.com and
-news.ycombinator.com (they ship with the extension and need no permission), `not a web page` on
-`chrome://`, `about:` and extension pages, `enabled — reload the tab to start judging` right after
-you enable one, `permission declined` if you dismiss Chrome's prompt. Under that is every site you
-have enabled, each with a `remove` link that switches it off again.
+The line under the button is the state you are in: `built in` on x.com, twitter.com, www.reddit.com
+and news.ycombinator.com — exactly the hosts in the manifest's `content_scripts`, so they ship with
+the extension and need no permission — `not a web page` on `chrome://`, `about:` and extension
+pages, `enabled — reload the tab to start judging` right after you enable one, `disabled — reload
+the tab to stop judging` after you switch one off, `permission declined` if you dismiss Chrome's
+prompt, and `permission request failed: …` if Chrome refuses to ask at all. Under that is every site
+you have enabled, each with a `remove` link that switches it off again. Anything else — including
+`old.reddit.com`, whose markup the built-in Reddit adapter does not understand — is an opt-in of its
+own, handled by the generic adapter.
 
 **What the heuristic needs.** The generic adapter has no selectors. It looks for the page's largest
 group of structurally repeated sibling blocks: at least 4 siblings sharing a tag-and-class
@@ -104,8 +108,10 @@ reports nothing rather than guessing.
 **Privacy.** Enabling a site grants exactly one host permission, for that origin. The extension
 never holds `<all_urls>`: the manifest declares `https://*/*` and `http://*/*` as *optional* host
 permissions, which is what Chrome may grant from, not what it has granted. Disabling a site (or its
-`remove` link) unregisters that site's content script and hands the permission back. Post text still
-goes only to the provider you configured, exactly as on the built-in sites.
+`remove` link) unregisters that site's content script and hands the permission back — for *future*
+page loads: a tab that already loaded the script keeps judging until you reload it, which is why the
+popup says `disabled — reload the tab to stop judging`. Post text still goes only to the provider
+you configured, exactly as on the built-in sites.
 
 ## CLI
 
@@ -246,7 +252,10 @@ Five things that make its job easier:
 - **The generic adapter needs repeated DOM.** It recognises a feed by structural repetition, so it
   never sees posts rendered inside a shadow root (it does not cross a shadow boundary), and it finds
   nothing on a single-page app whose posts have no repeated structure to share. Both look the same
-  from the popup: `0 posts seen on this page`, never a wrong fold.
+  from the popup: `0 posts seen on this page`, never a wrong fold. On a *virtualised* feed (one that
+  recycles a handful of DOM nodes as you scroll) a node that has been reused for a different post can
+  keep the fold it was given until the page reloads, since the decision is mounted on the element
+  rather than on the post.
 - **English first.** The compiler prompt and the mock compiler both assume English intents.
 - **v1 uses Noul questions only.** Jev's Choice and Score primitives are implemented in the provider
   layer but no v1 feature needs them, so nothing sorts or scores your feed yet.
