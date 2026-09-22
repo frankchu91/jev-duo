@@ -25,6 +25,15 @@ const SEEN_HEARTBEAT_MS = 30_000;
  * tweetText) gets re-extracted on every single MutationObserver scan for as long as it stays in the
  * DOM — unbounded, since findPosts() is idempotent and keeps returning it every time. */
 const MAX_EXTRACT_ATTEMPTS = 5;
+/** How long after a scan that found nothing before this script looks again on its own. Every other
+ * scan is reactive — a DOM mutation or a visibility change — so a page that renders its feed once and
+ * then goes quiet (an SPA committing its first render a second after document_idle, with the adapter
+ * throttled to nothing on that one call) would have no second chance at all: the mutation that would
+ * have triggered the rescan is the very one that got throttled. One pending retry at a time, armed
+ * only while the page has produced no posts whatsoever, so a page that IS producing posts is still
+ * driven entirely by its mutations. Matched to the generic adapter's own full-scan interval, so the
+ * retry always gets a real scan rather than another throttled no-op. */
+const EMPTY_RESCAN_MS = 5000;
 
 interface Pending { el: Element; targets: Element[]; item: Item }
 
@@ -53,6 +62,7 @@ export function startContentScript(
   let batch: string[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   let seenTimer: ReturnType<typeof setTimeout> | undefined;
+  let rescanTimer: ReturnType<typeof setTimeout> | undefined;
   let reportedSeen = -1; // -1, not 0, so the very first report goes out even when the page has no posts
   let rafScheduled = false;
   let stopped = false;
@@ -159,6 +169,20 @@ export function startContentScript(
         // one broken post must not stop the rest of the scan, or be marked seen (so it never recovers)
       }
     }
+    // Nothing found, and nothing ever found here: give the page one more look on our own (see
+    // EMPTY_RESCAN_MS). Re-armed by each empty scan, never while a scan is finding posts.
+    if (found.length === 0 && seenCount === 0) armRescan();
+  }
+
+  /** Arms the single pending self-rescan, if one isn't already armed. */
+  function armRescan(): void {
+    if (rescanTimer !== undefined || stopped) return;
+    rescanTimer = setTimeout(() => {
+      rescanTimer = undefined;
+      if (stopped) return;
+      scan();
+      scheduleSeenReport(); // a feed that turned up in that scan is news for the popup too
+    }, EMPTY_RESCAN_MS);
   }
 
   function scheduleScan(): void {
@@ -196,6 +220,7 @@ export function startContentScript(
       doc.removeEventListener('visibilitychange', onVisibilityChange);
       if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
       if (seenTimer !== undefined) { clearTimeout(seenTimer); seenTimer = undefined; }
+      if (rescanTimer !== undefined) { clearTimeout(rescanTimer); rescanTimer = undefined; }
       clearInterval(heartbeat);
     },
     seen: () => seenCount,

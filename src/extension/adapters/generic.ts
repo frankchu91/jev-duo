@@ -11,7 +11,10 @@ const MIN_TEXT = 40;
 const SIG_CLASSES = 3;
 const CLASS_MAX_LEN = 24;
 const TEXT_MAX = 2000;
-const LANDMARKS = 'nav, header, footer, aside, form';
+// Two views of one list, so they cannot drift: the tag set is checked on a candidate MEMBER (which
+// may be a landmark element itself), the selector on its PARENT (which may sit inside one).
+const LANDMARK_TAGS = new Set(['NAV', 'HEADER', 'FOOTER', 'ASIDE', 'FORM']);
+const LANDMARKS = [...LANDMARK_TAGS].join(', ').toLowerCase();
 const AUTHOR_SELECTORS = ['[rel="author"]', 'a[href*="/@"]', '[class*="author" i]', '[data-author]'];
 const SKIPPED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
 // `\b` after none/hidden rejects "display:nonesuch"/"visibility:hiddenpopup" while still matching
@@ -77,8 +80,16 @@ function signatureOf(el: Element): string {
   return `${el.tagName}|${classes.slice(0, SIG_CLASSES).join('.')}`;
 }
 
+/** True when `el` is inside a landmark (or is one). Used on a candidate PARENT: its members are direct
+ * children, so a parent inside a landmark means every member is too — one `closest` for the whole
+ * group instead of one per member. It does NOT cover a member that is a landmark element itself while
+ * its parent is not (four sibling `<form>` cards under a plain `<div>`); `isLandmarkTag` below is the
+ * member-level half of the rule, and costs a Set lookup rather than a tree walk. */
 function isLandmarked(el: Element): boolean {
   return !!el.closest(LANDMARKS);
+}
+function isLandmarkTag(el: Element): boolean {
+  return LANDMARK_TAGS.has(el.tagName);
 }
 function median(nums: number[]): number {
   const sorted = [...nums].sort((a, b) => a - b);
@@ -92,11 +103,12 @@ function contains(root: ParentNode, el: Element): boolean {
   return (root as unknown as Node).contains(el);
 }
 
-/** Direct children of `parent` sharing `signature`. The landmark rule is applied to `parent` itself by
- * both callers (see `scan` and `findPosts`): members are direct children, so they sit inside a landmark
- * exactly when their parent does, and one `closest` per parent replaces one per child. */
+/** Direct children of `parent` sharing `signature`, minus any that is a landmark element itself. The
+ * other half of the landmark rule — "inside a landmark" — is applied to `parent` by both callers (see
+ * `scan` and `findPosts`), since members are direct children and so sit inside a landmark exactly when
+ * their parent does: one `closest` per parent instead of one per child. */
 function siblingsOf(parent: Element, signature: string): Element[] {
-  return [...parent.children].filter((c) => signatureOf(c) === signature);
+  return [...parent.children].filter((c) => !isLandmarkTag(c) && signatureOf(c) === signature);
 }
 function qualifying(members: Element[], textOf: (el: Element) => string = collapsedText): Element[] {
   return members.filter((el) => textOf(el).length >= MIN_TEXT);
@@ -124,12 +136,16 @@ function scan(root: ParentNode): Group | undefined {
 
   for (const parent of root.querySelectorAll('*')) {
     if (parent.children.length < MIN_SIBLINGS) continue;
-    // One `closest` for the whole candidate group rather than one per child: every member is a direct
-    // child of `parent`, so a landmarked parent is exactly a landmarked group. Applied here (not on
-    // return) so a landmarked group can never accumulate enough members to qualify at all.
+    // Half of the landmark rule, once for the whole candidate group rather than once per child: every
+    // member is a direct child of `parent`, so a parent inside a landmark is a group inside a landmark.
+    // Applied here (not on return) so a landmarked group can never accumulate enough members to
+    // qualify at all.
     if (isLandmarked(parent)) continue;
     const bySignature = new Map<string, Element[]>();
     for (const child of parent.children) {
+      // The other half: a member that IS a landmark element (four sibling `<form>` cards under a plain
+      // `<div>`) is not covered by the parent check above. A tagName lookup, not another `closest`.
+      if (isLandmarkTag(child)) continue;
       const sig = signatureOf(child);
       const list = bySignature.get(sig);
       if (list) list.push(child);

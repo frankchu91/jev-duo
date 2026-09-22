@@ -261,6 +261,21 @@ describe('genericAdapter', () => {
     expect(posts.every((el) => el.classList.contains('post'))).toBe(true);
   });
 
+  // Fix round 2, MINOR: hoisting the landmark check to the candidate parent covers members that sit
+  // INSIDE a landmark, but not members that ARE one — four sibling `<form>` cards under a plain
+  // `<div>` have an unlandmarked parent. A tagName check on each member is the other half of the rule.
+  it('excludes members that are themselves landmark elements (4 sibling <form> cards are not a feed)', () => {
+    const doc = parse(`
+      <div class="cards">
+        <form class="post">Subscribe to the newsletter and get a weekly digest of everything posted here.</form>
+        <form class="post">Report this thread to the moderators with a short note about what is wrong.</form>
+        <form class="post">Search the archive for older discussions before opening a brand new thread.</form>
+        <form class="post">Filter the index by tag, by author, or by the month the thread was started.</form>
+      </div>
+    `);
+    expect(genericAdapter.findPosts(doc)).toEqual([]);
+  });
+
   // (f) pickAdapter: generic is the fallback for anything the built-ins don't claim, but never steals
   // a built-in host.
   it('pickAdapter falls through to generic for a non-built-in host, and still prefers x on x.com', () => {

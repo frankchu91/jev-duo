@@ -304,6 +304,74 @@ describe('startContentScript', () => {
     expect(reports()).toHaveLength(3); // the interval is cleared with everything else
   });
 
+  // Fix round 2, IMPORTANT: every other scan is reactive (a mutation, a visibility change), and the
+  // generic adapter now throttles a no-feed scan — so an SPA that commits its feed once, a second
+  // after document_idle, can strand itself: the one call it makes returns nothing, the mutation that
+  // would have rescanned is the very one that got throttled, and nothing ever looks again. The stub
+  // below reproduces exactly that shape (two empty findPosts calls, then a real feed) with NO
+  // mutations dispatched at all, so only a self-armed rescan can get the page judged.
+  describe('self-rescan after an empty scan', () => {
+    /** Makes `findPosts` return nothing for its first `emptyCalls` calls and the real feed after,
+     * and counts the calls. */
+    function stubLateFeed(emptyCalls: number): () => number {
+      const real = xAdapter.findPosts;
+      let calls = 0;
+      vi.spyOn(xAdapter, 'findPosts').mockImplementation((root) => {
+        calls += 1;
+        return calls <= emptyCalls ? [] : real(root);
+      });
+      return () => calls;
+    }
+
+    it('looks again 5s after an empty scan, and keeps doing so until a feed turns up', async () => {
+      vi.useFakeTimers();
+      const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+      const findCalls = stubLateFeed(2);
+      const calls: Request[] = [];
+      const script = runContentScript(doc, loc, makeFakeSend((req) => calls.push(req)));
+      const judges = (): Request[] => calls.filter((c) => c.type === 'judge');
+
+      expect(findCalls()).toBe(1); // the initial scan: empty
+      expect(judges()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(5000); // first self-rescan: still empty, so it arms one more
+      expect(findCalls()).toBe(2);
+      expect(judges()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(5000); // second self-rescan: the feed has rendered by now
+      expect(findCalls()).toBe(3);
+      expect(script.seen()).toBe(6);
+
+      await vi.advanceTimersByTimeAsync(200); // the judge debounce
+      const judged = judges();
+      expect(judged).toHaveLength(1);
+      if (judged[0].type === 'judge') expect(judged[0].items).toHaveLength(6);
+
+      // Posts found: the page is back to being driven by its own mutations, with nothing armed.
+      const afterFeed = findCalls();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(findCalls()).toBe(afterFeed);
+
+      script.stop();
+    });
+
+    it('stop() cancels the pending rescan: nothing is scanned or judged afterwards', async () => {
+      vi.useFakeTimers();
+      const { doc, loc } = loadDoc('x.html', '?jd-platform=x');
+      const findCalls = stubLateFeed(1);
+      const calls: Request[] = [];
+      const script = runContentScript(doc, loc, makeFakeSend((req) => calls.push(req)));
+      expect(findCalls()).toBe(1);
+
+      script.stop();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(findCalls()).toBe(1); // the armed timer never ran
+      expect(calls.filter((c) => c.type === 'judge')).toHaveLength(0);
+      expect(script.seen()).toBe(0);
+    });
+  });
+
   // Two elements can carry the same item id (a quoted or reposted tweet renders twice). The first copy
   // must still get its verdict; the duplicate is skipped rather than overwriting it and stranding it.
   it('a duplicate item id never leaves the first copy stuck in the pending state', async () => {

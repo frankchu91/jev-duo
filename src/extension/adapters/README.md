@@ -13,7 +13,13 @@ authored from that same research pass and are the source of truth the adapter te
 site changes its markup, re-run the research, update the fixture, and the fixture + this file move
 together.
 
-## x.com / twitter.com / pro.x.com (`x.ts`)
+Each `matches(url)` claims **exactly** the hosts the manifest's static `content_scripts` entry injects
+on — no subdomain forms. An adapter that claimed more would own hosts the extension never runs on, and
+`built-in-hosts.ts` (which derives its list from that same manifest entry) would disagree with it, so
+the popup would offer such a host neither `built in` nor the per-origin opt-in. Anything not listed
+below, `pro.x.com` and `old.reddit.com` included, goes through the generic adapter instead.
+
+## x.com / twitter.com (`x.ts`)
 
 | Field | Selector |
 |---|---|
@@ -28,7 +34,7 @@ together.
 | Link | `a[href^="http"]` inside the primary text element, or `[data-testid="card.wrapper"]` present |
 | targets | `[el]` |
 
-## reddit.com (`reddit.ts`)
+## www.reddit.com (`reddit.ts`)
 
 `shreddit-post` custom elements carry everything as attributes; ads are the separate tag
 `shreddit-ad-post` and are never selected.

@@ -8,12 +8,14 @@ import type { Item, ItemMeta } from '../../core/types';
 import type { Adapter } from './types';
 
 const BODY_MAX = 1500;
-/** The hosts this adapter claims, and only these. The shipped manifest injects the content script on
- * `https://www.reddit.com/*` alone, and the shreddit selectors below describe that redesign; the apex
- * is here because it redirects there. `old.reddit.com` renders completely different markup, so it is
- * deliberately NOT claimed — `pickAdapter` falls through to the generic adapter, which the user opts
- * into per origin like any other site, instead of a built-in adapter that would find nothing there. */
-const HOSTS = new Set(['www.reddit.com', 'reddit.com']);
+/** The one host this adapter claims: exactly what the manifest's static `content_scripts` entry
+ * injects on (`https://www.reddit.com/*`), which is also where the shreddit selectors below were read
+ * off. Every other reddit host falls through to the generic adapter and its per-origin opt-in — the
+ * apex because the extension is not injected there (it redirects to www anyway), `old.reddit.com`
+ * because it renders completely different markup that this adapter would find nothing in. An adapter
+ * claiming a host the manifest does not serve is a site the popup calls neither built in nor
+ * enable-able. */
+const HOSTS = new Set(['www.reddit.com']);
 
 function titleOf(el: Element): string | undefined {
   const attr = el.getAttribute('post-title');

@@ -7,7 +7,12 @@ import { fnv1a } from '../../core/hash';
 import type { Item, ItemMeta } from '../../core/types';
 import type { Adapter } from './types';
 
-const HOSTS = /(^|\.)(x\.com|twitter\.com|pro\.x\.com)$/i;
+/** Exactly the two hosts the manifest's static `content_scripts` entry injects on — `https://x.com/*`
+ * and `https://twitter.com/*` are Chrome match patterns for those hosts alone, not their subdomains.
+ * Claiming more (`pro.x.com`, `mobile.x.com`) meant an adapter that owned hosts the extension never
+ * ran on, and that the popup could not offer the per-origin opt-in for either, since `pickAdapter`
+ * answered `x` there and `isBuiltInHost` disagreed. They now fall through to the generic adapter. */
+const HOSTS = new Set(['x.com', 'twitter.com']);
 const TEXT_MAX = 1000;
 
 function outermostTweets(root: ParentNode): Element[] {
@@ -37,7 +42,7 @@ export const xAdapter: Adapter = {
   platform: 'x',
 
   matches(url) {
-    return HOSTS.test(url.hostname);
+    return HOSTS.has(url.hostname.toLowerCase());
   },
 
   findPosts(root) {

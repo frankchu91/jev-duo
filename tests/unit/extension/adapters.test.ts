@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { pickAdapter } from '../../../src/extension/adapters/index';
+import { isBuiltInHost } from '../../../src/extension/built-in-hosts';
 import { hnAdapter } from '../../../src/extension/adapters/hn';
 import { redditAdapter } from '../../../src/extension/adapters/reddit';
 import { xAdapter } from '../../../src/extension/adapters/x';
@@ -19,11 +20,16 @@ function loadDoc(name: string): Document {
 describe('xAdapter', () => {
   const doc = loadDoc('x.html');
 
-  it('matches x.com, twitter.com, pro.x.com and their subdomains, not other hosts', () => {
+  // Fix round 2: exactly the two hosts the manifest injects on. `https://x.com/*` is a Chrome match
+  // pattern for that host alone, so claiming pro./mobile./www. subdomains gave jev-duo an adapter for
+  // hosts it never runs on — and hid the per-origin opt-in that would make them work.
+  it('matches x.com and twitter.com exactly, never a subdomain or another host', () => {
     expect(xAdapter.matches(new URL('https://x.com/home'))).toBe(true);
     expect(xAdapter.matches(new URL('https://twitter.com/home'))).toBe(true);
-    expect(xAdapter.matches(new URL('https://pro.x.com/home'))).toBe(true);
-    expect(xAdapter.matches(new URL('https://mobile.x.com/home'))).toBe(true);
+    expect(xAdapter.matches(new URL('https://pro.x.com/home'))).toBe(false);
+    expect(xAdapter.matches(new URL('https://mobile.x.com/home'))).toBe(false);
+    expect(xAdapter.matches(new URL('https://www.x.com/home'))).toBe(false);
+    expect(xAdapter.matches(new URL('https://mobile.twitter.com/home'))).toBe(false);
     expect(xAdapter.matches(new URL('https://example.com'))).toBe(false);
   });
 
@@ -103,13 +109,13 @@ describe('xAdapter', () => {
 describe('redditAdapter', () => {
   const doc = loadDoc('reddit.html');
 
-  // Fix wave, I6b: the adapter claims www.reddit.com (what the manifest injects on, and what these
-  // shreddit selectors were read off) plus the apex that redirects there — and nothing else.
-  // old.reddit.com renders entirely different markup, so claiming it meant a built-in adapter that
-  // silently found zero posts; it now falls through to the generic adapter's per-origin opt-in.
-  it('matches www.reddit.com and the apex only — never old.reddit.com or another subdomain', () => {
+  // Fix wave I6b, narrowed again in fix round 2: exactly www.reddit.com — what the manifest injects
+  // on, and what these shreddit selectors were read off. The apex is not injected (it redirects to
+  // www) and old.reddit.com renders entirely different markup, so claiming either meant a built-in
+  // adapter that silently found zero posts; both now fall through to the per-origin opt-in.
+  it('matches www.reddit.com exactly — never the apex, old.reddit.com or another subdomain', () => {
     expect(redditAdapter.matches(new URL('https://www.reddit.com/r/test'))).toBe(true);
-    expect(redditAdapter.matches(new URL('https://reddit.com/r/test'))).toBe(true);
+    expect(redditAdapter.matches(new URL('https://reddit.com/r/test'))).toBe(false);
     expect(redditAdapter.matches(new URL('https://old.reddit.com/r/test'))).toBe(false);
     expect(redditAdapter.matches(new URL('https://sh.reddit.com/r/test'))).toBe(false);
     expect(redditAdapter.matches(new URL('https://example.com'))).toBe(false);
@@ -217,10 +223,16 @@ describe('pickAdapter', () => {
     expect(pickAdapter(new URL('https://localhost.evil.example/?jd-platform=x'))?.platform).toBe('generic');
   });
 
-  // Fix wave, I6b: with the reddit adapter no longer claiming it, old.reddit.com is just another site.
-  it('falls through to generic on old.reddit.com', () => {
-    expect(pickAdapter(new URL('https://old.reddit.com/r/programming'))?.platform).toBe('generic');
-  });
+  // Fix round 2: every host an adapter claims is now a host the manifest serves, so everything else —
+  // including hosts the adapters used to claim — is an ordinary per-origin opt-in on the generic
+  // adapter, and `isBuiltInHost` agrees with `pickAdapter` everywhere.
+  it.each(['https://pro.x.com/home', 'https://www.x.com/home', 'https://mobile.twitter.com/home', 'https://old.reddit.com/r/programming', 'https://reddit.com/r/programming'])(
+    'falls through to generic on %s',
+    (url) => {
+      expect(pickAdapter(new URL(url))?.platform).toBe('generic');
+      expect(isBuiltInHost(new URL(url).hostname)).toBe(false);
+    },
+  );
 
   it('matches by hostname when there is no override', () => {
     expect(pickAdapter(new URL('https://x.com/'))?.platform).toBe('x');

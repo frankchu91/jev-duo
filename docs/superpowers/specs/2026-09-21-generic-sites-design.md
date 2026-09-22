@@ -47,8 +47,12 @@ safe).
    construction*, not by a filter: every member of a group is a direct child
    of the same parent, so no member can contain another, and nothing
    downstream re-checks it. The landmark rule (`nav`, `header`, `footer`,
-   `aside`, `form`) is applied once to the candidate parent, which for the
-   same reason is equivalent to applying it to every member.
+   `aside`, `form`) is applied in two halves, neither of which needs a
+   `closest` per member: *inside a landmark* is checked once on the candidate
+   parent (members are direct children, so a parent inside a landmark is a
+   group inside one), and *is a landmark* is a tagName check on each member,
+   which the parent check does not cover — four sibling `<form>` cards under
+   a plain `<div>` are excluded by the second half, not the first.
 5. Results are cached per parent for the lifetime of the page and refreshed
    on the observer's rescans (new siblings with the same signature are
    picked up). A different group replaces the cached one only while the

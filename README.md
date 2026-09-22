@@ -87,14 +87,14 @@ adapter that you switch on per site, from the popup's **This site** section:
 4. Reload the tab. A newly enabled site starts judging on its next load.
 
 The line under the button is the state you are in: `built in` on x.com, twitter.com, www.reddit.com
-and news.ycombinator.com — exactly the hosts in the manifest's `content_scripts`, so they ship with
-the extension and need no permission — `not a web page` on `chrome://`, `about:` and extension
-pages, `enabled — reload the tab to start judging` right after you enable one, `disabled — reload
-the tab to stop judging` after you switch one off, `permission declined` if you dismiss Chrome's
-prompt, and `permission request failed: …` if Chrome refuses to ask at all. Under that is every site
-you have enabled, each with a `remove` link that switches it off again. Anything else — including
-`old.reddit.com`, whose markup the built-in Reddit adapter does not understand — is an opt-in of its
-own, handled by the generic adapter.
+and news.ycombinator.com — exactly those four hosts and no subdomain of them, because that is the
+list in the manifest's `content_scripts`, so they ship with the extension and need no permission —
+`not a web page` on `chrome://`, `about:` and extension pages, `enabled — reload the tab to start
+judging` right after you enable one, `disabled — reload the tab to stop judging` after you switch
+one off, `permission declined` if you dismiss Chrome's prompt, and `permission request failed: …` if
+Chrome refuses to ask at all. Under that is every site you have enabled, each with a `remove` link
+that switches it off again. Anything else — `old.reddit.com` and `pro.x.com` included — is an opt-in
+of its own, handled by the generic adapter.
 
 **What the heuristic needs.** The generic adapter has no selectors. It looks for the page's largest
 group of structurally repeated sibling blocks: at least 4 siblings sharing a tag-and-class
