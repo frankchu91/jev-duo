@@ -83,6 +83,16 @@ describe('startContentScript', () => {
 
     expect(doc.querySelectorAll('.jd-bar')).toHaveLength(3);
     expect(doc.querySelectorAll('[data-jd="pending"]')).toHaveLength(0);
+    // Every queued post carries the id its adapter derived, so a judged item can be found in the DOM
+    // (the e2e reads these to key its fixture probabilities off the real ids).
+    expect([...doc.querySelectorAll('[data-jd-id]')].map((el) => el.getAttribute('data-jd-id'))).toEqual([
+      'x:1700000000000000001',
+      'x:1700000000000000002',
+      'x:1700000000000000003',
+      'x:1700000000000000004',
+      'x:1700000000000000005',
+      'x:1700000000000000006',
+    ]);
     script.stop();
   });
 

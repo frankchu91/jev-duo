@@ -122,6 +122,10 @@ export function startContentScript(
     // their pending marker forever; the duplicate is simply skipped instead, staying fully visible.
     if (pendingById.has(item.id)) return;
     pendingById.set(item.id, { el, targets, item });
+    // The id the adapter derived, on the post it came from: the only way to find a specific item in a
+    // live feed (generic ids are content hashes), which is how the e2e keys its fixture probabilities
+    // off real ids. Written once, never read back by this script.
+    el.setAttribute('data-jd-id', item.id);
     applyPending(targets);
     batch.push(item.id);
     if (batch.length >= maxBatch) { flush(); return; }

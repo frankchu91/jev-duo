@@ -44,8 +44,9 @@ export interface ChromeStub {
    * `chrome.runtime.sendMessage` itself cannot express (it always reports the real caller). Used to
    * exercise background.ts's "this came from a content script" path. */
   dispatch(message: unknown, sender: unknown): Promise<unknown>;
-  /** What `chrome.tabs.query` resolves to; the popup reads `[0].id`. */
-  setTabs(tabs: Array<{ id?: number }>): void;
+  /** What `chrome.tabs.query` resolves to; the popup reads `[0].id` (to pick its tab's page-seen
+   * report) and `[0].url` (to drive the This-site section — readable thanks to `activeTab`). */
+  setTabs(tabs: Array<{ id?: number; url?: string }>): void;
   /** Makes the NEXT `chrome.permissions.request(...)` call resolve `false` (as if the user dismissed
    * Chrome's own permission prompt) without granting anything, then reverts to the default (grant
    * whatever was asked). One-shot, mirroring how a test drives one specific click. */
@@ -55,7 +56,7 @@ export interface ChromeStub {
 export function installChromeStub(): ChromeStub {
   const listeners: Listener[] = [];
   let lastError: { message: string } | undefined;
-  let tabs: Array<{ id?: number }> = [];
+  let tabs: Array<{ id?: number; url?: string }> = [];
 
   // In-memory stand-in for the origin patterns Chrome would actually hold host permission for (e.g.
   // "https://mastodon.social/*"), and for the extension's dynamically registered content scripts,
@@ -149,7 +150,7 @@ export function installChromeStub(): ChromeStub {
     storage: { local: createStorageArea(), session: createStorageArea() },
     runtime,
     tabs: {
-      async query(): Promise<Array<{ id?: number }>> {
+      async query(): Promise<Array<{ id?: number; url?: string }>> {
         return tabs;
       },
     },

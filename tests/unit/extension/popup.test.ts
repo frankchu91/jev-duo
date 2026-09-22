@@ -7,7 +7,7 @@ import type { DuoStats } from '../../../src/core/duo';
 import type { QuestionPack } from '../../../src/core/types';
 import type { PageSeenReport, Request, Response, Settings, send } from '../../../src/extension/messages';
 import { initPopup } from '../../../src/extension/popup/popup';
-import { installChromeStub } from './chrome-stub';
+import { installChromeStub, type ChromeStub } from './chrome-stub';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HTML = readFileSync(path.resolve(__dirname, '../../../src/extension/popup/popup.html'), 'utf8');
@@ -618,5 +618,216 @@ describe('initPopup', () => {
     expect(el(doc, 'compile-status').classList.contains('error')).toBe(false);
 
     doc.dispatchEvent(new Event('unload'));
+  });
+
+  // --- Generic sites (design addendum §4): the "This site" section ---
+
+  describe('#this-site', () => {
+    /** Installs the chrome stub with `url` as the active tab's — the section reads `tabs.query`'s
+     * `url` (available because the manifest asks for `activeTab`) to decide which state to show. */
+    function withActiveTabUrl(url: string | undefined): ChromeStub {
+      const stub = installChromeStub();
+      stub.setTabs([{ id: 7, ...(url === undefined ? {} : { url }) }]);
+      return stub;
+    }
+
+    /** A fake `send` that answers getState with `genericSites` and echoes enable/disable back with the
+     * resulting list, recording every request (interleaved with permission calls) in `log`. */
+    function sendWithSites(genericSites: string[], log: string[]) {
+      let sites = [...genericSites];
+      return makeFakeSend((req) => {
+        log.push(req.type);
+        if (req.type === 'getState') return getStateResponse({ genericSites: sites });
+        if (req.type === 'enableSite') {
+          sites = [...new Set([...sites, req.origin])].sort();
+          return { ok: true, type: 'enableSite', genericSites: sites };
+        }
+        if (req.type === 'disableSite') {
+          sites = sites.filter((o) => o !== req.origin);
+          return { ok: true, type: 'disableSite', genericSites: sites };
+        }
+        return { ok: false, error: 'unhandled' };
+      });
+    }
+
+    /** Origin patterns whose permission prompt the user "declines" (see `spyOnPermissionRequest`). */
+    const DENY = new Set<string>();
+
+    /** Spies on the stub's `chrome.permissions.request`, appending `permissions.request` to `log` so a
+     * test can assert it happened BEFORE the enableSite message (Chrome needs the user gesture). The
+     * cast narrows `chrome.permissions` to the one promise-returning overload `vi.spyOn` can mock. */
+    function spyOnPermissionRequest(log: string[]) {
+      const { permissions } = (globalThis as unknown as { chrome: { permissions: { request(p: { origins?: string[] }): Promise<boolean> } } }).chrome;
+      return vi.spyOn(permissions, 'request').mockImplementation(async (perm) => {
+        log.push('permissions.request');
+        return !(perm.origins ?? []).some((o) => DENY.has(o));
+      });
+    }
+
+    afterEach(() => {
+      DENY.clear();
+      vi.restoreAllMocks();
+      delete (globalThis as { chrome?: unknown }).chrome;
+    });
+
+    it('shows a built-in site as built in, with no button', async () => {
+      withActiveTabUrl('https://x.com/home');
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(sendWithSites([], [])) });
+
+      expect(el(doc, 'site-origin').textContent).toBe('https://x.com');
+      expect(el(doc, 'site-status').textContent).toBe('built in');
+      expect(el<HTMLButtonElement>(doc, 'site-toggle').hidden).toBe(true);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it.each(['chrome://extensions/', 'about:blank', 'chrome-extension://abc/popup.html', undefined])(
+      'shows %s as not a web page, with no button',
+      async (url) => {
+        withActiveTabUrl(url);
+        const doc = loadDoc();
+        await initPopup(doc, { send: asSend(sendWithSites([], [])) });
+
+        expect(el(doc, 'site-status').textContent).toBe('not a web page');
+        expect(el<HTMLButtonElement>(doc, 'site-toggle').hidden).toBe(true);
+
+        doc.dispatchEvent(new Event('unload'));
+      },
+    );
+
+    it('offers to enable an http(s) origin that is not in genericSites', async () => {
+      withActiveTabUrl('https://mastodon.social/home');
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(sendWithSites([], [])) });
+
+      expect(el(doc, 'site-origin').textContent).toBe('https://mastodon.social');
+      const toggle = el<HTMLButtonElement>(doc, 'site-toggle');
+      expect(toggle.hidden).toBe(false);
+      expect(toggle.textContent).toBe('Enable on this site');
+      expect(doc.querySelectorAll('#generic-sites li')).toHaveLength(0);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('asks Chrome for the host permission BEFORE sending enableSite, then shows the site as enabled', async () => {
+      withActiveTabUrl('https://mastodon.social/home');
+      const log: string[] = [];
+      const doc = loadDoc();
+      const send = sendWithSites([], log);
+      const requestSpy = spyOnPermissionRequest(log);
+      await initPopup(doc, { send: asSend(send) });
+
+      el<HTMLButtonElement>(doc, 'site-toggle').click();
+      await flush();
+
+      expect(requestSpy).toHaveBeenCalledWith({ origins: ['https://mastodon.social/*'] });
+      // The permission prompt must come first: the background has no user gesture to spend.
+      expect(log.filter((e) => e !== 'getState')).toEqual(['permissions.request', 'enableSite']);
+
+      expect(el<HTMLButtonElement>(doc, 'site-toggle').textContent).toBe('Disable on this site');
+      expect(el(doc, 'site-status').textContent).toBe('enabled — reload the tab to start judging');
+      const items = doc.querySelectorAll('#generic-sites li');
+      expect(items).toHaveLength(1);
+      expect(items[0]?.textContent).toContain('https://mastodon.social');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('sends nothing when the permission prompt is declined, and says so', async () => {
+      withActiveTabUrl('https://mastodon.social/home');
+      const log: string[] = [];
+      const doc = loadDoc();
+      const send = sendWithSites([], log);
+      DENY.add('https://mastodon.social/*');
+      spyOnPermissionRequest(log);
+      await initPopup(doc, { send: asSend(send) });
+
+      el<HTMLButtonElement>(doc, 'site-toggle').click();
+      await flush();
+
+      expect(log).not.toContain('enableSite');
+      expect(el(doc, 'site-status').textContent).toBe('permission declined');
+      expect(el<HTMLButtonElement>(doc, 'site-toggle').textContent).toBe('Enable on this site');
+      expect(doc.querySelectorAll('#generic-sites li')).toHaveLength(0);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('shows an ok:false enableSite error and leaves the button on Enable', async () => {
+      withActiveTabUrl('https://mastodon.social/home');
+      const doc = loadDoc();
+      spyOnPermissionRequest([]);
+      const send = makeFakeSend((req) => (req.type === 'getState' ? getStateResponse() : { ok: false, error: 'invalid origin' }));
+      await initPopup(doc, { send: asSend(send) });
+
+      el<HTMLButtonElement>(doc, 'site-toggle').click();
+      await flush();
+
+      expect(el(doc, 'site-status').textContent).toBe('invalid origin');
+      expect(el(doc, 'site-status').classList.contains('error')).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'site-toggle').textContent).toBe('Enable on this site');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('an already-enabled origin offers Disable, and clicking it disables without a permission prompt', async () => {
+      withActiveTabUrl('https://mastodon.social/home');
+      const log: string[] = [];
+      const doc = loadDoc();
+      const send = sendWithSites(['https://mastodon.social'], log);
+      const requestSpy = spyOnPermissionRequest(log);
+      await initPopup(doc, { send: asSend(send) });
+
+      const toggle = el<HTMLButtonElement>(doc, 'site-toggle');
+      expect(toggle.textContent).toBe('Disable on this site');
+      expect(el(doc, 'site-status').textContent).toBe('enabled');
+
+      toggle.click();
+      await flush();
+
+      expect(requestSpy).not.toHaveBeenCalled();
+      expect(log).toContain('disableSite');
+      expect(toggle.textContent).toBe('Enable on this site');
+      expect(el(doc, 'site-status').textContent).toBe('disabled');
+      expect(doc.querySelectorAll('#generic-sites li')).toHaveLength(0);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('lists every enabled origin, and a remove link disables that one', async () => {
+      withActiveTabUrl('https://mastodon.social/home');
+      const log: string[] = [];
+      const doc = loadDoc();
+      const send = sendWithSites(['https://lobste.rs', 'https://mastodon.social'], log);
+      await initPopup(doc, { send: asSend(send) });
+
+      const items = [...doc.querySelectorAll('#generic-sites li')];
+      expect(items.map((li) => li.textContent)).toEqual(['https://lobste.rs remove', 'https://mastodon.social remove']);
+
+      items[0]?.querySelector('a')?.click();
+      await flush();
+
+      const disables = send.mock.calls.map(([req]) => req).filter((req) => req.type === 'disableSite');
+      expect(disables).toHaveLength(1);
+      if (disables[0]?.type === 'disableSite') expect(disables[0].origin).toBe('https://lobste.rs');
+      expect([...doc.querySelectorAll('#generic-sites li')].map((li) => li.textContent)).toEqual(['https://mastodon.social remove']);
+      // The active tab is still enabled, so its own button is untouched by removing another origin.
+      expect(el<HTMLButtonElement>(doc, 'site-toggle').textContent).toBe('Disable on this site');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('takes the active tab url from deps when given (the popup-in-a-tab test hook)', async () => {
+      withActiveTabUrl('chrome-extension://abc/popup.html');
+      const doc = loadDoc();
+      const send = sendWithSites(['https://mastodon.social'], []);
+      await initPopup(doc, { send: asSend(send), activeTabUrl: 'https://mastodon.social/home' });
+
+      expect(el(doc, 'site-origin').textContent).toBe('https://mastodon.social');
+      expect(el(doc, 'site-status').textContent).toBe('enabled');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
   });
 });

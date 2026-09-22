@@ -16,6 +16,7 @@ import {
   waitForJudged,
   type LaunchedExtension,
 } from './helpers';
+import { FIXTURE_ORIGIN } from './server';
 
 const INTENT = 'Hide crypto shilling and ragebait. Keep anything about Rust.';
 
@@ -173,6 +174,109 @@ test('popup shows the compiled intent and rules', async () => {
   await expect(page.locator('#rules li').first()).toContainText('crypto shilling');
   await expect(page.locator('#rules li').last()).toContainText('anything about Rust');
   await expect(page.locator('#brain-status')).toHaveText('fast brain: mock · slow brain: mock');
+
+  await page.close();
+});
+
+// --- Generic sites (design addendum §4/§6): the same loop on a page with no adapter of its own.
+// These run BEFORE the two @live tests below, which switch providerMode to a real key for good.
+
+/** No `?jd-platform`: `pickAdapter` falls through to the generic adapter on its own. */
+const GENERIC_URL = `${FIXTURE_ORIGIN}/generic.html`;
+
+test('generic: the origin gate holds when the site is not enabled', async () => {
+  await seedSettings(ext, { genericSites: [] });
+
+  const page = await ext.context.newPage();
+  await page.goto(GENERIC_URL);
+
+  // The e2e's manifest copy matches the fixture origin, so content.js really does load here — what
+  // this proves is the gate in boot() (isSiteEnabled for platform 'generic'), not a missing script.
+  // `expect.poll` alone would pass on its first sample, so ~2s worth of samples is collected instead
+  // and every one of them has to be zero (the x fixture is fully judged in well under a second).
+  const samples: number[] = [];
+  await expect
+    .poll(
+      async () => {
+        samples.push(await page.locator('[data-jd-id]').count());
+        return samples.length;
+      },
+      { timeout: 10_000, intervals: [200], message: 'expected 10 samples of the judged-post count' },
+    )
+    .toBeGreaterThanOrEqual(10);
+  expect(samples).toEqual(new Array(samples.length).fill(0));
+  await expect(page.locator('.jd-bar')).toHaveCount(0);
+  await expect(page.locator('.jd-tag')).toHaveCount(0);
+
+  await page.close();
+});
+
+test('generic: folds the two shills and the ragebait post on the generic fixture, keeps the Rust one', async () => {
+  await seedSettings(ext, { providerMode: 'mock', mockFixtures: MOCK_FIXTURES, genericSites: [FIXTURE_ORIGIN] });
+
+  const page = await ext.context.newPage();
+  await page.goto(GENERIC_URL);
+  await expect(page.locator('[data-jd-id]')).toHaveCount(6);
+
+  // A generic id is a content hash (`g:<fnv1a(host + text)>`), so the fixture map can't be written by
+  // hand: this reads the ids the adapter actually produced and matches posts to them by TEXT, never
+  // by position.
+  const posts = await page.$$eval('[data-jd-id]', (els) => els.map((el) => ({ id: el.getAttribute('data-jd-id') ?? '', text: el.textContent ?? '' })));
+  const idOf = (needle: string): string => {
+    const matched = posts.filter((p) => p.text.includes(needle));
+    if (matched.length !== 1) throw new Error(`jev-duo e2e: ${matched.length} generic posts contain ${JSON.stringify(needle)}, expected 1`);
+    return matched[0].id;
+  };
+  const genericFixtures: Record<string, Record<string, number>> = {
+    [idOf('$MOON500')]: { ...none, 'r_crypto-shilling': HIT },
+    [idOf('$FROG9000')]: { ...none, 'r_crypto-shilling': HIT },
+    [idOf('pineapple on pizza')]: { ...none, r_ragebait: HIT },
+    [idOf('rewriting our config parser in Rust')]: { ...none, 'k_anything-about-rust': KEEP },
+    [idOf('retrospective on migrating the build pipeline')]: { ...none },
+    [idOf('Totally agree with this take')]: { ...none },
+  };
+  expect(Object.keys(genericFixtures)).toHaveLength(6); // six distinct ids: no two posts hash alike
+  await seedSettings(ext, { mockFixtures: { ...MOCK_FIXTURES, ...genericFixtures } });
+
+  // The verdict cache key is `pack.compiledAt|item.id|item.text` and setSettings only drops the cache
+  // when the PROVIDER changed, so the pass above would otherwise be replayed from cache. Recompiling
+  // the same intent mints a new compiledAt (same rule ids, asserted here) so the reload is judged
+  // fresh, from the fixtures just seeded.
+  const pack = await compileIntent(ext, INTENT);
+  expect(pack.rules.map((r) => r.id)).toEqual(ruleIds);
+  expect(pack.keeps.map((k) => k.id)).toEqual(keepIds);
+
+  await page.reload();
+  await waitForJudged(page, 6); // 3 fold bars + 1 kept tag + 2 plain keeps (their hover "hide this")
+
+  await expect(page.locator('.jd-bar')).toHaveCount(3);
+  await expect(page.locator('.jd-bar').first()).toBeVisible();
+  await expect(page.locator('.jd-folded')).toHaveCount(3);
+  expect(await page.locator('.jd-bar').evaluateAll((els) => els.map((e) => e.getAttribute('data-jd-rule')))).toEqual([
+    'crypto-shilling',
+    'crypto-shilling',
+    'ragebait',
+  ]);
+
+  const rust = page.locator(`[data-jd-id="${idOf('rewriting our config parser in Rust')}"]`);
+  await expect(rust).toBeVisible();
+  await expect(rust.locator('.jd-tag')).toHaveText(/kept/);
+  await expect(page.locator('.jd-tag')).toHaveCount(1);
+
+  await page.close();
+});
+
+test('popup: This site shows the fixture origin as enabled', async () => {
+  const page = await ext.context.newPage();
+  // `?jd-tab=` is popup.ts's documented test hook: opened in a tab of its own, the popup's
+  // `chrome.tabs.query({active:true})` answers with that very tab, so the page to inspect is named.
+  await page.goto(`chrome-extension://${ext.extensionId}/popup.html?jd-tab=${encodeURIComponent(GENERIC_URL)}`);
+
+  await expect(page.locator('#site-origin')).toHaveText(FIXTURE_ORIGIN);
+  await expect(page.locator('#site-status')).toHaveText(/^enabled/);
+  await expect(page.locator('#site-toggle')).toHaveText('Disable on this site');
+  await expect(page.locator('#generic-sites li')).toHaveCount(1);
+  await expect(page.locator('#generic-sites li').first()).toContainText(FIXTURE_ORIGIN);
 
   await page.close();
 });

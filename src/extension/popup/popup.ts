@@ -25,17 +25,43 @@ const MODEL_PLACEHOLDER: Record<Settings['providerMode'], string> = {
 const NO_PAGE_REPORT = 'no page report yet';
 const ZERO_SEEN = "0 posts seen on this page — the site's layout may have changed";
 
-/** The active tab's id, used to pick this window's `pageSeen` report out of getState. `tabs.query`
- * needs no `tabs` permission for the id alone. Returns undefined outside a real extension popup (the
- * unit tests' detached document) or if the query fails, which renders as "no page report yet". */
-async function activeTabId(): Promise<number | undefined> {
+/** Mirrors the three built-in adapters' own host matching (adapters/{x,reddit,hn}.ts). Those sites run
+ * from the manifest's static `content_scripts` entry and are switched by the Sites checkboxes above,
+ * so the This-site section below only ever says so — there is nothing per-origin to grant. */
+const BUILT_IN_HOST = /(^|\.)(x\.com|twitter\.com|reddit\.com)$|^news\.ycombinator\.com$/i;
+
+/** The active tab, used to pick this window's `pageSeen` report out of getState (by `id`) and to drive
+ * the This-site section (by `url`, readable while the popup is open thanks to `activeTab`).
+ * `tabs.query` needs no `tabs` permission for either field here. Returns undefined outside a real
+ * extension popup (the unit tests' detached document) or if the query fails, which renders as
+ * "no page report yet" / "not a web page". */
+async function activeTab(): Promise<{ id?: number; url?: string } | undefined> {
   if (typeof chrome === 'undefined' || !chrome.tabs?.query) return undefined;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tab?.id;
+    return tab;
   } catch {
     return undefined;
   }
+}
+
+/** The tab's URL as a `URL`, or undefined when it is not an http(s) page (`chrome://`, `about:`, an
+ * extension page) or not parseable at all — exactly the cases This site calls "not a web page". */
+function parseHttpUrl(href: string): URL | undefined {
+  try {
+    const url = new URL(href);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Chrome's own permission prompt for one origin. It MUST be called synchronously from the popup's
+ * click handler — Chrome requires a user gesture, and the service worker has none, which is why
+ * background.ts/sites.ts never request permissions themselves (design §4). */
+async function requestOrigin(origin: string): Promise<boolean> {
+  if (typeof chrome === 'undefined' || !chrome.permissions?.request) return false;
+  return chrome.permissions.request({ origins: [`${origin}/*`] });
 }
 
 /** Every id here is baked into popup.html, so a miss means the two have drifted apart — fail loudly
@@ -85,7 +111,7 @@ function renderRules(doc: Document, listEl: HTMLElement, pack: QuestionPack | un
   }
 }
 
-export async function initPopup(doc: Document, deps: { send: typeof send }): Promise<void> {
+export async function initPopup(doc: Document, deps: { send: typeof send; activeTabUrl?: string }): Promise<void> {
   const { send } = deps;
 
   const versionEl = doc.getElementById('v');
@@ -110,6 +136,10 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
   const siteXEl = $<HTMLInputElement>(doc, 'site-x');
   const siteRedditEl = $<HTMLInputElement>(doc, 'site-reddit');
   const siteHnEl = $<HTMLInputElement>(doc, 'site-hn');
+  const siteOriginEl = $(doc, 'site-origin');
+  const siteToggleEl = $<HTMLButtonElement>(doc, 'site-toggle');
+  const siteStatusEl = $(doc, 'site-status');
+  const genericSitesEl = $(doc, 'generic-sites');
   const statsEl = $(doc, 'stats');
   const pageSeenEl = $(doc, 'page-seen');
   const examplesEl = $(doc, 'examples');
@@ -144,6 +174,58 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
     siteHnEl.checked = s.enabledSites.hn;
     updateProviderUI(s.providerMode);
     renderRules(doc, rulesEl, s.pack);
+    genericSites = s.genericSites;
+    renderThisSite();
+  }
+
+  // --- This site (design addendum §4): opting any origin into the generic adapter, one click ---
+
+  /** Every enabled generic origin, each with a `remove` link (the same effect as Disable below). */
+  function renderGenericSites(): void {
+    genericSitesEl.textContent = '';
+    for (const origin of genericSites) {
+      const li = doc.createElement('li');
+      li.textContent = `${origin} `;
+      const remove = doc.createElement('a');
+      remove.href = '#';
+      remove.textContent = 'remove';
+      remove.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        void applySiteChange('disableSite', origin);
+      });
+      li.appendChild(remove);
+      genericSitesEl.appendChild(li);
+    }
+  }
+
+  function defaultSiteStatus(enabled: boolean): string {
+    if (siteBuiltIn) return 'built in'; // shipped in the manifest's static content_scripts; see the Sites checkboxes
+    if (siteOrigin === undefined) return 'not a web page';
+    return enabled ? 'enabled' : '';
+  }
+
+  /** Renders the whole section from the active tab plus the current `genericSites`. `status` overrides
+   * the state's own status line with what a click just did. */
+  function renderThisSite(status?: string, isError = false): void {
+    const enabled = siteOrigin !== undefined && genericSites.includes(siteOrigin);
+    siteOriginEl.textContent = siteOrigin ?? '';
+    siteToggleEl.hidden = siteOrigin === undefined || siteBuiltIn;
+    siteToggleEl.textContent = enabled ? 'Disable on this site' : 'Enable on this site';
+    siteStatusEl.textContent = status ?? defaultSiteStatus(enabled);
+    siteStatusEl.classList.toggle('error', isError);
+    renderGenericSites();
+  }
+
+  /** Sends enableSite/disableSite and re-renders from the reply's `genericSites`, which is the full
+   * resulting list — the popup never derives it locally from the request it just sent. */
+  async function applySiteChange(type: 'enableSite' | 'disableSite', origin: string, status?: string): Promise<void> {
+    const res = await send({ type, origin });
+    if (!res.ok) {
+      renderThisSite(res.error, true);
+      return;
+    }
+    genericSites = res.genericSites;
+    renderThisSite(status);
   }
 
   function fillStats(stats: DuoStats, exampleCount: number): void {
@@ -182,8 +264,13 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
   let loadFailed = false;
 
   // Resolved once below, before the first getState: the active tab cannot change while the popup
-  // that opened over it is open.
+  // that opened over it is open. `siteOrigin` is that tab's http(s) origin (undefined on a
+  // chrome://, about: or extension page) and `siteBuiltIn` whether it is one of the three shipped
+  // sites; `genericSites` is the last list the background reported.
   let tabId: number | undefined;
+  let siteOrigin: string | undefined;
+  let siteBuiltIn = false;
+  let genericSites: string[] = [];
 
   /** Re-fetches state. Normally refreshes only the read-only displays (stats/examples/brain status) —
    * never the input controls, since a periodic tick or a Reset click must not clobber whatever the
@@ -257,12 +344,36 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
   keyTypesafeEl.addEventListener('change', () => patchSettings({ keys: { typesafe: keyTypesafeEl.value } }));
   keyAnthropicEl.addEventListener('change', () => patchSettings({ keys: { anthropic: keyAnthropicEl.value } }));
 
+  // Design §4's one-click opt-in: Chrome's permission prompt runs FIRST and inside this click handler
+  // (it needs the user gesture, which the service worker has none of), and only a granted permission
+  // reaches the background, which then registers the origin's dynamic content script.
+  siteToggleEl.addEventListener(
+    'click',
+    guardClick([siteToggleEl], async () => {
+      const origin = siteOrigin;
+      if (origin === undefined) return;
+      if (genericSites.includes(origin)) {
+        await applySiteChange('disableSite', origin, 'disabled');
+        return;
+      }
+      if (!(await requestOrigin(origin))) {
+        renderThisSite('permission declined');
+        return;
+      }
+      await applySiteChange('enableSite', origin, 'enabled — reload the tab to start judging');
+    }),
+  );
+
   arbiterEl.addEventListener('change', () => patchSettings({ arbiter: arbiterEl.checked }));
   siteXEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
   siteRedditEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
   siteHnEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
 
-  tabId = await activeTabId();
+  const tab = await activeTab();
+  tabId = tab?.id;
+  const parsedUrl = parseHttpUrl(deps.activeTabUrl ?? tab?.url ?? '');
+  siteOrigin = parsedUrl?.origin;
+  siteBuiltIn = parsedUrl !== undefined && BUILT_IN_HOST.test(parsedUrl.hostname);
 
   const initial = await send({ type: 'getState' });
   if (initial.ok && initial.type === 'getState') {
@@ -290,5 +401,9 @@ export async function initPopup(doc: Document, deps: { send: typeof send }): Pro
 // Auto-wire when actually running as the extension popup. Guarded so importing this module in a test
 // (jsdom's `document` exists, but no `chrome` global unless a test stubs one) never runs it.
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined') {
-  void initPopup(document, { send }).catch((err: unknown) => console.error('jev-duo popup: init failed', err));
+  // `?jd-tab=<url>` is a TEST HOOK for the e2e, honoured only when popup.html is opened as an ordinary
+  // tab — the action popup never has a query string — because `chrome.tabs.query({active:true})` would
+  // otherwise answer with the popup's own tab there. Nothing in the shipped UI ever sets it.
+  const activeTabUrl = new URLSearchParams(location.search).get('jd-tab') ?? undefined;
+  void initPopup(document, { send, activeTabUrl }).catch((err: unknown) => console.error('jev-duo popup: init failed', err));
 }
