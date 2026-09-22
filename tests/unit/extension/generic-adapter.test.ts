@@ -68,6 +68,23 @@ describe('genericAdapter', () => {
       expect(genericAdapter.extract(posts[0])?.url).toBe(location.href);
       expect(genericAdapter.extract(posts[3])?.url).toBe(location.href);
     });
+
+    // Fix round 1, IMPORTANT #1 (spec §3.2): extracted text is VISIBLE text — an inline <style> block
+    // and an aria-hidden span must not leak into it.
+    it("excludes an inline <style> block and an aria-hidden span from the extracted text", () => {
+      const doc = parse(`
+        <article class="post">
+          <style>.post { color: red; }</style>
+          Some genuinely visible lead-in text for this post that is long enough to qualify on its own.
+          <span aria-hidden="true">SECRET_HIDDEN_MARKER</span>
+        </article>
+      `);
+      const el = doc.querySelector('.post')!;
+      const text = genericAdapter.extract(el)?.text ?? '';
+      expect(text).not.toContain('color: red');
+      expect(text).not.toContain('SECRET_HIDDEN_MARKER');
+      expect(text).toContain('Some genuinely visible lead-in text');
+    });
   });
 
   // (c) generated classes (containing digits) are dropped from the signature, so 7 forum threads with
@@ -108,6 +125,27 @@ describe('genericAdapter', () => {
         <h2>FAQ</h2>
         <p>Check the FAQ page.</p>
       </article>
+    `);
+    expect(genericAdapter.findPosts(doc)).toEqual([]);
+  });
+
+  // Fix round 1, IMPORTANT #1 (spec §3.2): qualification uses VISIBLE text. 3 of 6 similar posts pad
+  // their raw textContent past MIN_TEXT with a <script> and a `hidden` div but have only ~20 visible
+  // chars of their own; those 3 must not qualify, dropping the group to 3 qualifying members (< 4), so
+  // the whole group is rejected and findPosts fails closed to zero — not 3, not 6.
+  it('excludes script and hidden-subtree text from qualification: 3 padded-but-short posts among 6 sink the group', () => {
+    const filler = 'x'.repeat(200);
+    const shortVisible = 'Not much to see here.'; // ~22 visible chars, well under MIN_TEXT
+    const normal = (n: number) => `Real post number ${n} with plenty of genuinely visible text to clear the forty character minimum.`;
+    const doc = parse(`
+      <ul class="items">
+        <li class="item">${shortVisible}<script>${filler}</script><div hidden>${filler}</div></li>
+        <li class="item">${shortVisible}<script>${filler}</script><div hidden>${filler}</div></li>
+        <li class="item">${shortVisible}<script>${filler}</script><div hidden>${filler}</div></li>
+        <li class="item">${normal(1)}</li>
+        <li class="item">${normal(2)}</li>
+        <li class="item">${normal(3)}</li>
+      </ul>
     `);
     expect(genericAdapter.findPosts(doc)).toEqual([]);
   });
@@ -164,8 +202,9 @@ describe('genericAdapter', () => {
     }
     expect(genericAdapter.findPosts(doc)).toHaveLength(12);
 
-    // A competing group of 7 elsewhere: fewer than double the cached 12 (needs >= 12) — moot anyway,
-    // since the cached .timeline parent is still in the document, so it's never even reconsidered.
+    // A competing group of 7 elsewhere: findPosts reconsiders it (a full scan runs every call once a
+    // cache exists), but 7 is fewer than double the cached, still-healthy, still-attached 12 (needs
+    // >= 24), so it doesn't displace .timeline.
     const aside = doc.createElement('div');
     aside.className = 'sidebar';
     doc.body.appendChild(aside);
@@ -176,5 +215,60 @@ describe('genericAdapter', () => {
       aside.appendChild(card);
     }
     expect(genericAdapter.findPosts(doc)).toHaveLength(12);
+  });
+
+  // Fix round 1, IMPORTANT #2 (spec §3.5, ruling): while the cached parent is still attached and still
+  // qualifies on its own, a DIFFERENT group elsewhere only displaces it at >= 2x its member count.
+  it('a different competing group only displaces a healthy, still-attached cached group at >= 2x its size', () => {
+    const doc = loadDoc('generic.html');
+    expect(genericAdapter.findPosts(doc)).toHaveLength(6); // warms the cache: .timeline, count 6
+
+    const promo = doc.createElement('div');
+    promo.className = 'promo';
+    doc.body.appendChild(promo);
+    const addCard = (i: number): void => {
+      const card = doc.createElement('div');
+      card.className = 'promo-card';
+      card.textContent = `Sponsored card number ${i} with enough text to clear the forty character minimum easily.`;
+      promo.appendChild(card);
+    };
+    for (let i = 0; i < 7; i++) addCard(i);
+
+    // 7 < 2 x 6 (needs >= 12): the cached, still fully-attached .timeline group is not displaced.
+    const stillOld = genericAdapter.findPosts(doc);
+    expect(stillOld).toHaveLength(6);
+    expect(stillOld.every((el) => el.classList.contains('status'))).toBe(true);
+
+    for (let i = 7; i < 12; i++) addCard(i); // grows the competing group to 12 == 2 x 6
+
+    // 12 >= 2 x 6: the competing group now displaces the cached one.
+    const displaced = genericAdapter.findPosts(doc);
+    expect(displaced).toHaveLength(12);
+    expect(displaced.every((el) => el.classList.contains('promo-card'))).toBe(true);
+  });
+
+  // Fix round 1, IMPORTANT #2 (spec §3.5, ruling): once the cached parent is detached (the old feed is
+  // gone), the next qualifying group found anywhere is adopted regardless of size — no 2x gate.
+  it('adopts the next qualifying group regardless of size once the cached parent is detached', () => {
+    const doc = loadDoc('generic.html');
+    expect(genericAdapter.findPosts(doc)).toHaveLength(6); // warms the cache: .timeline, count 6
+
+    doc.querySelector('.timeline')!.remove(); // the cached parent (and its 6 members) is now detached
+
+    const list = doc.createElement('ul');
+    list.className = 'threads';
+    doc.body.appendChild(list);
+    for (let i = 0; i < 4; i++) {
+      const li = doc.createElement('li');
+      li.className = 'thread';
+      li.textContent = `A short new thread number ${i} with just enough text to clear the minimum here.`;
+      list.appendChild(li);
+    }
+
+    // Only 4 members — well under 2 x 6 (would need >= 12) — but the old parent is gone, so the
+    // replacement gate doesn't apply at all.
+    const posts = genericAdapter.findPosts(doc);
+    expect(posts).toHaveLength(4);
+    expect(posts.every((el) => el.classList.contains('thread'))).toBe(true);
   });
 });

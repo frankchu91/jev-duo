@@ -48,8 +48,12 @@ safe).
    element inside `nav`, `header`, `footer`, `aside`, `form`.
 5. Results are cached per parent for the lifetime of the page and refreshed
    on the observer's rescans (new siblings with the same signature are
-   picked up; a new, larger group replaces the old one only if it has at
-   least twice as many members, to avoid flapping).
+   picked up). A different group replaces the cached one only while the
+   cached parent is still attached to the document and still has
+   `MIN_SIBLINGS` qualifying children of its own, and only when the new
+   group has at least twice as many members, to avoid flapping; once the
+   cached parent is detached (or no longer qualifies on its own), the next
+   qualifying group found anywhere is adopted regardless of size.
 
 **Extraction (`extract`)**: `text` = the element's text with whitespace
 collapsed, capped at 2000 chars; `null` when shorter than `MIN_TEXT`.

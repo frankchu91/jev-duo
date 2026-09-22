@@ -13,9 +13,34 @@ const CLASS_MAX_LEN = 24;
 const TEXT_MAX = 2000;
 const LANDMARKS = 'nav, header, footer, aside, form';
 const AUTHOR_SELECTORS = ['[rel="author"]', 'a[href*="/@"]', '[class*="author" i]', '[data-author]'];
+const SKIPPED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+const HIDDEN_STYLE = /display\s*:\s*none|visibility\s*:\s*hidden/i;
+
+function isHidden(el: Element): boolean {
+  return (
+    SKIPPED_TAGS.has(el.tagName) ||
+    el.hasAttribute('hidden') ||
+    el.getAttribute('aria-hidden') === 'true' ||
+    HIDDEN_STYLE.test(el.getAttribute('style') ?? '')
+  );
+}
+
+// Visible text (spec §3.2): `el`'s text minus script/style/noscript/template subtrees and minus any
+// hidden/aria-hidden/inline-hidden element's subtree. jsdom has no layout, so this is a structural
+// approximation, not real computed visibility. Every reader of text — qualification, the median/
+// tie-break in `scan`, and `extract`'s `text` field — goes through `collapsedText` below.
+function visibleText(node: Element): string {
+  if (isHidden(node)) return '';
+  let text = '';
+  for (const child of node.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) text += child.textContent ?? '';
+    else if (child.nodeType === Node.ELEMENT_NODE) text += visibleText(child as Element);
+  }
+  return text;
+}
 
 function collapsedText(el: Element): string {
-  return (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+  return visibleText(el).replace(/\s+/g, ' ').trim();
 }
 
 // tagName + up to 3 sorted classes; a class with a digit, or longer than 24 chars, is dropped as
@@ -34,17 +59,10 @@ function median(nums: number[]): number {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-// `ParentNode` doesn't statically expose `Node`'s `contains`/`ownerDocument`, though every real
-// Document/Element passed in has them — the casts below reflect that, not a runtime risk.
+// `ParentNode` doesn't statically expose `Node`'s `contains`, though every real Document/Element passed
+// in has it — the cast below reflects that, not a runtime risk.
 function contains(root: ParentNode, el: Element): boolean {
   return (root as unknown as Node).contains(el);
-}
-// Same Document as `el`? Scopes the flapping guard in `findPosts` to one page: a cached count from an
-// unrelated document (only between independent test fixtures — a real navigation reloads this module
-// fresh) must never suppress a first scan of a new page.
-function sameDocument(root: ParentNode, el: Element): boolean {
-  const node = root as unknown as Node;
-  return (node.nodeType === 9 ? node : node.ownerDocument) === el.ownerDocument;
 }
 
 // Direct children of `parent` sharing `signature`, dropping any inside a landmark — applied here (not
@@ -100,29 +118,38 @@ function authorElementOf(el: Element): Element | undefined {
 }
 let cache: { parent: Element; signature: string; count: number } | undefined;
 
+// Caches `found` as the current group (or clears the cache when nothing qualifies) and returns its
+// outermost members — the shared tail of every "adopt regardless of size" path in `findPosts` below.
+function adopt(found: Group | undefined): Element[] {
+  if (!found) {
+    cache = undefined;
+    return [];
+  }
+  cache = { parent: found.parent, signature: found.signature, count: found.members.length };
+  return outermost(found.members);
+}
+
 export const genericAdapter: Adapter = {
   platform: 'generic',
   matches: () => true,
   findPosts(root) {
-    if (cache && contains(root, cache.parent)) {
-      const members = qualifying(siblingsOf(cache.parent, cache.signature));
-      if (members.length === 0) {
-        cache = undefined;
-        return [];
-      }
-      cache.count = members.length;
-      return outermost(members);
-    }
-
-    const priorCount = cache && sameDocument(root, cache.parent) ? cache.count : 0;
-    cache = undefined;
     const found = scan(root);
-    if (!found) return [];
-    // Replace the cached group only when the new one is at least twice its size, to avoid flapping.
-    if (priorCount > 0 && found.members.length < priorCount * 2) return [];
+    if (!cache) return adopt(found);
 
-    cache = { parent: found.parent, signature: found.signature, count: found.members.length };
-    return outermost(found.members);
+    const attached = contains(root, cache.parent);
+    const own = attached ? qualifying(siblingsOf(cache.parent, cache.signature)) : [];
+    // The cached group is a baseline worth protecting only while it's both attached and still qualifies
+    // on its own (spec §3.5); once it's gone (removed from the document) or has thinned below
+    // MIN_SIBLINGS, the next qualifying group found anywhere is adopted regardless of size.
+    if (!attached || own.length < MIN_SIBLINGS) return adopt(found);
+
+    // A healthy cached group is displaced only by a DIFFERENT group at least twice its size, to avoid
+    // flapping between two similarly-sized candidates.
+    if (found && (found.parent !== cache.parent || found.signature !== cache.signature) && found.members.length >= cache.count * 2) {
+      return adopt(found);
+    }
+    cache.count = own.length;
+    return outermost(own);
   },
   extract(el) {
     const text = collapsedText(el).slice(0, TEXT_MAX);
