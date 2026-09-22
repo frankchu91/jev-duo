@@ -284,6 +284,11 @@ provider API origins only — the content scripts get their access from
 `history` (the popup's `chrome.tabs.query` needs no permission to read
 the active tab's id).
 
+Sites beyond the three built-ins — the generic adapter, the popup's
+`This site` opt-in and the per-origin permissions (`activeTab`,
+`scripting`, `optional_host_permissions`) it needs — are specified in
+the addendum `2026-09-21-generic-sites-design.md`.
+
 ### 5.1 Components
 
 - `background.ts` (service worker): owns one `DuoAgent`. Handles

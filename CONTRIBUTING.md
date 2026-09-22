@@ -57,6 +57,11 @@ If you change a selector:
 All three move together. A selector change with no fixture change is not reviewable, because nothing
 proves the new selector matches anything real.
 
+`adapters/generic.ts` is the fallback for every other site and has no selectors at all: it finds a
+feed by structural repetition (design addendum `2026-09-21-generic-sites-design.md` §3). The same
+rule applies to it — tune the heuristic and `tests/e2e/fixtures/generic.html` moves with it, because
+that Mastodon-like fixture is what proves the tuning still recognises a real feed.
+
 ## Commits
 
 One logical change per commit. Subject line in the imperative mood with a conventional-commit

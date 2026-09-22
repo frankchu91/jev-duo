@@ -3,8 +3,9 @@
 A two-brain agent that reads your feeds with you: an LLM writes the rules, Jev enforces them at
 roughly 100 ms per post.
 
-Works on x.com, reddit.com and news.ycombinator.com as a Chrome extension, and on the Hacker News
-front page (or any JSONL) from the terminal as `jev-duo`.
+Works on x.com, reddit.com and news.ycombinator.com as a Chrome extension — plus any other feed-like
+site you enable from the popup, one origin at a time — and on the Hacker News front page (or any
+JSONL) from the terminal as `jev-duo`.
 
 ## How it works
 
@@ -67,11 +68,44 @@ stderr.
    post, records an example. After 10 examples the extension recompiles the pack on its own; the
    popup's **Recompile from feedback** button does it immediately.
 5. Tune with the **Strictness** slider. It offsets every threshold at decision time (clamped to
-   [0.5, 0.95]) without editing the stored pack. Per-site toggles and a stats panel (judged, folded,
-   kept by rule, errors, p50 latency, estimated cost) are in the same popup.
+   [0.5, 0.95]) without editing the stored pack. Toggles for the three built-in sites, the **This
+   site** opt-in for everything else (see [Other sites](#other-sites)) and a stats panel (judged,
+   folded, kept by rule, errors, p50 latency, estimated cost) are in the same popup.
 6. Check the page line under the stats. It reads `N posts seen on <site>` for the tab the popup was
    opened over, or `0 posts seen on this page — the site's layout may have changed` when the
    adapter found nothing, which is what a site redesign looks like from the inside.
+
+## Other sites
+
+The three built-in sites have hand-written adapters. Every other site goes through one generic
+adapter that you switch on per site, from the popup's **This site** section:
+
+1. Open the site you want filtered.
+2. Click the jev-duo icon. **This site** shows the origin of the tab you opened the popup over.
+3. Press **Enable on this site**. Chrome asks for permission to read that one origin — jev-duo only
+   ever asks for the site in front of you, never for all sites.
+4. Reload the tab. A newly enabled site starts judging on its next load.
+
+The line under the button is the state you are in: `built in` on x.com, twitter.com, reddit.com and
+news.ycombinator.com (they ship with the extension and need no permission), `not a web page` on
+`chrome://`, `about:` and extension pages, `enabled — reload the tab to start judging` right after
+you enable one, `permission declined` if you dismiss Chrome's prompt. Under that is every site you
+have enabled, each with a `remove` link that switches it off again.
+
+**What the heuristic needs.** The generic adapter has no selectors. It looks for the page's largest
+group of structurally repeated sibling blocks: at least 4 siblings sharing a tag-and-class
+signature, at least 4 of them carrying 40 characters or more of visible text, and the group's median
+text length also 40 or more. Groups inside `nav`, `header`, `footer`, `aside` and `form` are
+skipped, and a post nested inside another (a quoted post) is judged only as part of the outer one.
+A Mastodon timeline, a forum index or a blog archive qualifies. A documentation page has no such
+repetition, so nothing is judged and the popup reads `0 posts seen on this page` — the adapter
+reports nothing rather than guessing.
+
+**Privacy.** Enabling a site grants exactly one host permission, for that origin. The extension
+never holds `<all_urls>`: the manifest declares `https://*/*` and `http://*/*` as *optional* host
+permissions, which is what Chrome may grant from, not what it has granted. Disabling a site (or its
+`remove` link) unregisters that site's content script and hands the permission back. Post text still
+goes only to the provider you configured, exactly as on the built-in sites.
 
 ## CLI
 
@@ -191,9 +225,11 @@ Five things that make its job easier:
 - **Nothing is logged or sent anywhere else.** Counters, the compiled pack and your examples sit in
   `chrome.storage.local`; the verdict cache sits in `chrome.storage.session` and dies with the
   browser session.
-- **Permissions are `storage` plus host permissions for the three API origins.** The content
-  scripts get their access from `content_scripts.matches`, not from host permissions. No `tabs`, no
-  `history`.
+- **Permissions are `storage`, `activeTab` and `scripting`, plus host permissions for the three API
+  origins.** The built-in content scripts get their access from `content_scripts.matches`; any other
+  site is a single host permission you grant from the popup and take back by disabling it.
+  `activeTab` is what lets the popup read the URL of the tab it was opened over; `scripting`
+  registers the content script for a site you enabled. No `tabs`, no `history`, no `<all_urls>`.
 
 ## Status & known limits
 
@@ -207,6 +243,10 @@ Five things that make its job easier:
   `src/extension/adapters/README.md`, and is covered by the fixtures in `tests/e2e/fixtures`. When a
   site changes, one adapter and one fixture change together. If an adapter finds nothing, the popup
   reports zero posts seen rather than failing silently.
+- **The generic adapter needs repeated DOM.** It recognises a feed by structural repetition, so it
+  never sees posts rendered inside a shadow root (it does not cross a shadow boundary), and it finds
+  nothing on a single-page app whose posts have no repeated structure to share. Both look the same
+  from the popup: `0 posts seen on this page`, never a wrong fold.
 - **English first.** The compiler prompt and the mock compiler both assume English intents.
 - **v1 uses Noul questions only.** Jev's Choice and Score primitives are implemented in the provider
   layer but no v1 feature needs them, so nothing sorts or scores your feed yet.
@@ -228,7 +268,7 @@ pnpm test:e2e     # Playwright, headless, loads the real built extension
 | `pnpm typecheck` | `tsc --noEmit` over `src` and `tests` |
 | `pnpm test` | vitest unit suite |
 | `pnpm build` | esbuild bundles `dist/cli` and `dist/extension` |
-| `pnpm test:e2e` | Playwright: extension over the X/Reddit/HN fixtures, plus the built CLI |
+| `pnpm test:e2e` | Playwright: extension over the X/Reddit/HN/generic fixtures, plus the built CLI |
 | `pnpm test:e2e:live` | the same with `LIVE=1`, adding the live HN and live Jev tests |
 | `pnpm package:ext` | zips `dist/extension` into `jev-duo-extension.zip` |
 | `pnpm check` | typecheck, unit tests and build in one go (the same three steps CI runs before e2e) |
@@ -243,7 +283,8 @@ scripts/           build.mjs, package-extension.mjs, make-icons.mjs
 docs/superpowers/  specs/, plans/, research/
 ```
 
-The design spec is `docs/superpowers/specs/2026-09-20-jev-duo-design.md`, the implementation plan is
+The design spec is `docs/superpowers/specs/2026-09-20-jev-duo-design.md` (with the generic-sites
+addendum in `specs/2026-09-21-generic-sites-design.md`), the implementation plan is
 `docs/superpowers/plans/2026-09-20-jev-duo.md`, and the provider and selector research the client
 code was written from is in `docs/superpowers/research/`. See `CONTRIBUTING.md` before opening a PR.
 
