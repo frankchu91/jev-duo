@@ -145,11 +145,11 @@ access to <origin>**, which asks Chrome for that one origin. **Open a PDF from y
 local file instead, which never touches the network at all. For an arXiv PDF the reader points at the
 HTML version of the same paper, which has real paragraphs and reads better.
 
-**What is sent.** Per passage: the passage text (capped at 1500 characters), the document title and
-its lead (capped at 600). Nothing else — no URL, no page, no surrounding text — and no LLM call is
-made at any point. PDF bytes are fetched by the reader page and never leave the browser. Reading a
-page injects the reader into that one tab under `activeTab`; no new permission is added to the
-manifest for any of this.
+**What is sent.** Per passage: the passage text (capped at 1500 characters), the document title
+(capped at 200 characters) and its lead (capped at 600). Nothing else — no URL, no page, no
+surrounding text — and no LLM call is made at any point. PDF bytes are fetched by the reader page and
+never leave the browser. Reading a page injects the reader into that one tab under `activeTab`; no new
+permission is added to the manifest for any of this.
 
 **Limits.** Reading is explicit, per document, and never runs on its own. Judgments use fixed
 thresholds — the **Strictness** slider is a feed-mode control and does not apply. A passage whose

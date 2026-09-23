@@ -2,10 +2,13 @@
 // popup exactly as a user would. Its own browser context (Playwright runs spec files one at a time
 // here), because extension.spec.ts switches the provider to a live key partway through its run.
 
+import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { fnv1a } from '../../src/core/hash';
-import { launchWithExtension, seedSettings, type LaunchedExtension } from './helpers';
+import { launchWithExtension, ROOT, seedSettings, type LaunchedExtension } from './helpers';
 import { FIXTURE_ORIGIN } from './server';
+
+const SAMPLE_PDF = path.join(ROOT, 'tests/e2e/fixtures/sample.pdf');
 
 const ARTICLE_URL = `${FIXTURE_ORIGIN}/article.html`;
 
@@ -116,6 +119,57 @@ test('the reader page reads a PDF fetched from a host the manifest allows', asyn
   await expect(page.locator('.jd-passage', { hasText: 'every position attends to every other position' })).toHaveClass(/jd-hl/);
   await expect(page.locator('#jd-reader ol li')).not.toHaveCount(0);
   await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+
+  await page.close();
+});
+
+test('the reader page reads a PDF picked from disk', async () => {
+  const page = await ext.context.newPage();
+  await page.goto(`chrome-extension://${ext.extensionId}/reader.html`);
+  await expect(page.locator('#status')).toHaveText('open a PDF from your computer to read it');
+
+  await page.setInputFiles('#file', SAMPLE_PDF);
+
+  // Same assertions as the URL path: a picked file goes through the identical parse/render/judge flow.
+  await expect(page.locator('.jd-passage')).toHaveCount(8);
+  await expect(page.locator('.jd-page-mark')).toHaveCount(2);
+  await expect(page.locator('.jd-heading')).toHaveCount(4);
+  await expect(page.locator('h1')).toHaveText('Sample Paper');
+  await expect(page.locator('.jd-passage', { hasText: 'every position attends to every other position' })).toHaveClass(/jd-hl/);
+  await expect(page.locator('#jd-reader ol li')).not.toHaveCount(0);
+  await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+
+  await page.close();
+});
+
+test('a PDF that fails to parse shows a status instead of hanging, and the picker still works afterward', async () => {
+  const page = await ext.context.newPage();
+  // article.html fetches fine (real bytes, real 200) but is not a PDF at all — the same failure shape
+  // as an HTML interstitial served at a .pdf URL (a login wall, a "this paper moved" page, ...).
+  await page.goto(`chrome-extension://${ext.extensionId}/reader.html?src=${encodeURIComponent(`${FIXTURE_ORIGIN}/article.html`)}`);
+
+  await expect(page.locator('#status')).toHaveText(/^can't read this PDF: /);
+  await expect(page.locator('#status')).toHaveClass(/error/);
+  await expect(page.locator('.jd-passage')).toHaveCount(0);
+
+  // The picker is never disabled by a failure: picking a real PDF afterward still works.
+  await page.setInputFiles('#file', SAMPLE_PDF);
+  await expect(page.locator('.jd-passage')).toHaveCount(8);
+  await expect(page.locator('#status')).not.toHaveClass(/error/);
+
+  await page.close();
+});
+
+test('an empty or non-http(s) src is rejected up front, with the picker still available', async () => {
+  const page = await ext.context.newPage();
+  await page.goto(`chrome-extension://${ext.extensionId}/reader.html?src=${encodeURIComponent('file:///Users/me/paper.pdf')}`);
+
+  await expect(page.locator('#status')).toHaveText('not a PDF URL');
+  await expect(page.locator('#status')).toHaveClass(/error/);
+  await expect(page.locator('.jd-passage')).toHaveCount(0);
+
+  await page.setInputFiles('#file', SAMPLE_PDF);
+  await expect(page.locator('.jd-passage')).toHaveCount(8);
 
   await page.close();
 });

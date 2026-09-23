@@ -6,6 +6,7 @@
 // Run with `pnpm build`. Icons must exist first (`pnpm build:icons`).
 
 import { build } from 'esbuild';
+import { existsSync } from 'node:fs';
 import { chmod, cp, mkdir, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,6 +94,10 @@ for (const file of [
 // extension's own origin (reader.ts points GlobalWorkerOptions.workerSrc at chrome.runtime.getURL),
 // which the default extension CSP allows and which needs no web_accessible_resources entry.
 const workerSrc = path.join(root, 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.min.mjs');
+if (!existsSync(workerSrc)) {
+  console.error('build: no pdf.worker.min.mjs in node_modules/pdfjs-dist/build — run `pnpm install` first');
+  process.exit(1);
+}
 const workerDest = path.join(extDist, 'pdf.worker.mjs');
 await cp(workerSrc, workerDest);
 outputs.push(rel(workerDest));
