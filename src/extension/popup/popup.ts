@@ -10,6 +10,7 @@ import type { DuoStats } from '../../core/duo';
 import type { QuestionPack } from '../../core/types';
 import { isBuiltInHost } from '../built-in-hosts';
 import { send, type PageSeenReport, type Response, type Settings } from '../messages';
+import type { ReadResult } from '../read-page';
 
 const DEBOUNCE_MS = 300;
 const STATS_REFRESH_MS = 2000;
@@ -27,13 +28,21 @@ const NO_PAGE_REPORT = 'no page report yet';
 const ZERO_SEEN = "0 posts seen on this page — the site's layout may have changed";
 
 /** The active tab, used to pick this window's `pageSeen` report out of getState (by `id`) and to drive
- * the This-site section (by `url`, readable while the popup is open thanks to `activeTab`).
- * `tabs.query` needs no `tabs` permission for either field here. Returns undefined outside a real
- * extension popup (the unit tests' detached document) or if the query fails, which renders as
+ * the This-site and Read this page sections (by `url`/`title`, readable while the popup is open thanks
+ * to `activeTab`). `tabs.query` needs no `tabs` permission for any of these. Returns undefined outside
+ * a real extension popup (the unit tests' detached document) or if the query fails, which renders as
  * "no page report yet" / "not a web page". */
-async function activeTab(): Promise<{ id?: number; url?: string } | undefined> {
+async function activeTab(hookUrl?: string): Promise<{ id?: number; url?: string; title?: string } | undefined> {
   if (typeof chrome === 'undefined' || !chrome.tabs?.query) return undefined;
   try {
+    // `?jd-tab=<url>` is the e2e's popup-in-a-tab hook: `{active:true}` would answer with the popup's
+    // OWN tab there, so the tab to act on is named by URL instead. It needs host permission for that
+    // URL, which the e2e's patched manifest grants; nothing in the shipped UI ever sets the hook, and
+    // a miss falls through to the normal query rather than leaving the popup with no tab at all.
+    if (hookUrl !== undefined) {
+      const [named] = await chrome.tabs.query({ url: hookUrl });
+      if (named) return named;
+    }
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     return tab;
   } catch {
@@ -50,6 +59,21 @@ function parseHttpUrl(href: string): URL | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** §7: a tab worth offering the PDF reader for — a `.pdf` path, or an arXiv `/pdf/<id>` URL, which
+ * serves a PDF with no extension at all. */
+function looksLikePdf(url: URL): boolean {
+  return /\.pdf$/i.test(url.pathname) || (url.hostname === 'arxiv.org' && url.pathname.startsWith('/pdf/'));
+}
+
+/** §7's status line for the injection result. `undefined` means the script ran but handed nothing
+ * back (an older build, or a frame that could not report) — it is still reading. */
+function describeRead(result: ReadResult | undefined): string {
+  if (!result) return 'reading';
+  if (result.state === 'stopped') return 'stopped';
+  if (result.state === 'no-article') return `this page does not look like an article (${result.passages} passages)`;
+  return `reading ${result.passages} passages`;
 }
 
 /** The outcome of asking Chrome for one origin: granted, declined, or the call itself failing (an
@@ -123,6 +147,11 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   const versionEl = doc.getElementById('v');
   if (versionEl && typeof chrome !== 'undefined') versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
 
+  const focusEl = $<HTMLInputElement>(doc, 'focus');
+  const readPageBtn = $<HTMLButtonElement>(doc, 'read-page');
+  const readPdfBtn = $<HTMLButtonElement>(doc, 'read-pdf');
+  const readStatusEl = $(doc, 'read-status');
+  const openReaderEl = $<HTMLAnchorElement>(doc, 'open-reader');
   const intentEl = $<HTMLTextAreaElement>(doc, 'intent');
   const compileBtn = $<HTMLButtonElement>(doc, 'compile');
   const compileStatusEl = $(doc, 'compile-status');
@@ -166,6 +195,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   }
 
   function fillSettings(s: Settings): void {
+    focusEl.value = s.focus;
     intentEl.value = s.intent;
     strictnessEl.value = String(s.strictness);
     updateStrictnessDisplay();
@@ -232,6 +262,38 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     }
     genericSites = res.genericSites;
     renderThisSite(status);
+  }
+
+  // --- Read this page (design addendum §7): the reader is an action, never an always-on judge ---
+
+  /** The active tab's http(s) URL and title, resolved once below. `undefined` is "not a web page". */
+  let tabUrl: URL | undefined;
+  let tabTitle: string | undefined;
+
+  function setReadStatus(text: string, isError = false): void {
+    readStatusEl.textContent = text;
+    readStatusEl.classList.toggle('error', isError);
+  }
+
+  function renderReading(): void {
+    if (!tabUrl) {
+      readPageBtn.hidden = false;
+      readPageBtn.disabled = true;
+      readPdfBtn.hidden = true;
+      setReadStatus('not a web page');
+      return;
+    }
+    const pdf = looksLikePdf(tabUrl);
+    readPageBtn.hidden = pdf;
+    readPageBtn.disabled = false;
+    readPdfBtn.hidden = !pdf;
+    setReadStatus('');
+  }
+
+  /** Opens the extension's own reader page, optionally pointed at a PDF. Not web-accessible: only
+   * the extension can navigate to it (§10). */
+  function openReader(src?: string): void {
+    void chrome.tabs.create({ url: chrome.runtime.getURL(`reader.html${src ? `?src=${encodeURIComponent(src)}` : ''}`) });
   }
 
   function fillStats(stats: DuoStats, exampleCount: number): void {
@@ -382,16 +444,50 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     }),
   );
 
+  // activeTab covers this injection: opening the popup is the gesture that grants it, and the script
+  // goes into the current tab and nowhere else (§11). The result is the injected bundle's completion
+  // value — see scripts/build.mjs's footer.
+  readPageBtn.addEventListener(
+    'click',
+    guardClick([readPageBtn], async () => {
+      if (tabId === undefined) {
+        setReadStatus("can't read this tab: no tab id", true);
+        return;
+      }
+      try {
+        const results = await chrome.scripting.executeScript({ target: { tabId }, files: ['read-page.js'] });
+        setReadStatus(describeRead(results[0]?.result as ReadResult | undefined));
+      } catch (err) {
+        setReadStatus(`can't read this tab: ${err instanceof Error ? err.message : String(err)}`, true);
+        // A tab Chrome will not let a script into is very often a PDF it is displaying itself, which
+        // the reader page CAN open — so offer it rather than leaving a dead end.
+        if (tabTitle?.toLowerCase().endsWith('.pdf')) readPdfBtn.hidden = false;
+      }
+    }),
+  );
+
+  readPdfBtn.addEventListener('click', () => openReader(tabUrl?.href));
+  openReaderEl.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    openReader();
+  });
+
+  const debouncedFocus = debounce((v: string) => patchSettings({ focus: v }), DEBOUNCE_MS);
+  focusEl.addEventListener('input', () => debouncedFocus(focusEl.value));
+
   arbiterEl.addEventListener('change', () => patchSettings({ arbiter: arbiterEl.checked }));
   siteXEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
   siteRedditEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
   siteHnEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));
 
-  const tab = await activeTab();
+  const tab = await activeTab(deps.activeTabUrl);
   tabId = tab?.id;
+  tabTitle = tab?.title;
   const parsedUrl = parseHttpUrl(deps.activeTabUrl ?? tab?.url ?? '');
+  tabUrl = parsedUrl;
   siteOrigin = parsedUrl?.origin;
   siteBuiltIn = parsedUrl !== undefined && isBuiltInHost(parsedUrl.hostname);
+  renderReading();
 
   const initial = await send({ type: 'getState' });
   if (initial.ok && initial.type === 'getState') {

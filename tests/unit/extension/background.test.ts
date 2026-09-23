@@ -960,4 +960,82 @@ describe('background', () => {
       if (res.ok && res.type === 'getState') expect(res.settings.providerMode).toBe('mock');
     });
   });
+
+  // --- Reading mode (design addendum §9): one handler, no gate, its own judge ---
+
+  describe('readPassages', () => {
+    const ctx = { title: 'Sample Paper', lead: 'A lead.', source: 'https://example.test/p' };
+    const passage = (id: string, text: string) => ({ id, index: 0, text });
+
+    it('judges the passages with the mock provider and honours fixtures keyed by passage id', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'setSettings', patch: { providerMode: 'mock', mockFixtures: { 'rd:1': { core: 0.95 }, 'rd:2': { core: 0.05 } } } });
+
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'a substantive claim'), passage('rd:2', 'boilerplate')] });
+
+      expect(res.ok).toBe(true);
+      if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(res.verdicts.map((v) => v.verdict)).toEqual(['highlight', 'dim']);
+      expect(res.errors).toBe(0);
+      expect(res.focus).toBe('');
+    });
+
+    it('applies settings.focus and reports it back to the reader', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'setSettings', patch: { focus: 'how is position represented', mockFixtures: { 'rd:1': { core: 0.1, focus: 0.9 } } } });
+
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'sinusoidal position encodings')] });
+
+      if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(res.focus).toBe('how is position represented');
+      // Highlighted on the focus probability alone, with a core well under the no-focus threshold.
+      expect(res.verdicts[0]).toMatchObject({ verdict: 'highlight', focus: 0.9, core: 0.1 });
+    });
+
+    it('is available to a content-script sender: reading carries no secrets', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'some text')] }, { tab: { id: 3 }, origin: 'https://example.test' });
+      expect(res.ok).toBe(true);
+    });
+
+    it('needs no compiled pack, unlike judge', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'some text')] });
+      expect(res.ok).toBe(true);
+    });
+
+    it('caches a passage across calls while the provider is unchanged', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'setSettings', patch: { mockFixtures: { 'rd:1': { core: 0.95 } } } });
+      await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'stable text')] });
+
+      // A new fixture for the same passage: the cached verdict wins, because the judge (and its cache)
+      // survives a settings change that cannot have changed the provider.
+      await bg.handle({ type: 'setSettings', patch: { mockFixtures: { 'rd:1': { core: 0.05 } } } });
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'stable text')] });
+
+      if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(res.verdicts[0].core).toBe(0.95);
+    });
+
+    it('throws the judge away when a key changes, so nothing is served from the old provider', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      await bg.handle({ type: 'setSettings', patch: { mockFixtures: { 'rd:1': { core: 0.95 } } } });
+      await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'stable text')] });
+
+      // providerMode stays mock (so nothing goes near the network), but a key changed — which is
+      // exactly what providersMayHaveChanged looks at, and what must drop the reading cache.
+      await bg.handle({ type: 'setSettings', patch: { keys: { typesafe: 'ts-key' }, mockFixtures: { 'rd:1': { core: 0.05 } } } });
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'stable text')] });
+
+      if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(res.verdicts[0].core).toBe(0.05);
+    });
+  });
 });

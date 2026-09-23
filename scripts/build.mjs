@@ -47,8 +47,15 @@ const extEntries = [
   { entry: 'background.ts', out: 'background.js', format: 'esm' },
   { entry: 'content.ts', out: 'content.js', format: 'iife' },
   { entry: path.join('popup', 'popup.ts'), out: 'popup.js', format: 'iife' },
+  // The injected reader has to HAND ITS RESULT BACK to the popup: chrome.scripting.executeScript
+  // resolves with the completion value of the injected file's last statement, and a bundle's last
+  // statement is the IIFE call, whose value is undefined. esbuild's `footer.js` is inserted verbatim
+  // after everything else (not minified, not part of the bundle's scope), so one more expression
+  // statement reading the global the bundle just assigned is exactly what is needed. Verified against
+  // esbuild 0.28.2, whose BuildOptions declares `footer?: { [type: string]: string }`.
+  { entry: 'read-page.ts', out: 'read-page.js', format: 'iife', footer: { js: 'globalThis.__jevDuoReadResult;' } },
 ];
-for (const { entry, out, format } of extEntries) {
+for (const { entry, out, format, footer } of extEntries) {
   const outfile = path.join(extDist, out);
   await build({
     entryPoints: [path.join(extSrc, entry)],
@@ -58,6 +65,7 @@ for (const { entry, out, format } of extEntries) {
     format,
     target: 'chrome120',
     minify: true,
+    ...(footer ? { footer } : {}),
     logLevel: 'warning',
   });
   outputs.push(rel(outfile));

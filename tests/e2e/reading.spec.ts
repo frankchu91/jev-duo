@@ -1,0 +1,99 @@
+// End-to-end reading mode: the REAL built extension reading the article fixture, driven from the
+// popup exactly as a user would. Its own browser context (Playwright runs spec files one at a time
+// here), because extension.spec.ts switches the provider to a live key partway through its run.
+
+import { expect, test } from '@playwright/test';
+import { fnv1a } from '../../src/core/hash';
+import { launchWithExtension, seedSettings, type LaunchedExtension } from './helpers';
+import { FIXTURE_ORIGIN } from './server';
+
+const ARTICLE_URL = `${FIXTURE_ORIGIN}/article.html`;
+
+// The reader derives `rd:<fnv1a(text.slice(0,300))>` from the paragraph's collapsed text, and every
+// paragraph in the fixture is a single literal line — so these ids are computable here, by hand, the
+// same way the generic e2e derives its own.
+const id = (text: string): string => `rd:${fnv1a(text.slice(0, 300))}`;
+
+const ABSTRACT =
+  'We study how attention layers behave on documents far longer than the window they were trained on, and show that a fixed sinusoidal encoding degrades more gracefully than a learned one.';
+const METHOD =
+  'The method encodes each input token as a vector, adds a positional signal to it, and then applies a stack of attention layers in which every position attends to every other position of the same sequence.';
+const ACK =
+  'We thank our colleagues for their comments on an earlier draft, the reviewers for their careful reading, and the maintainers of the open source libraries this work depends on.';
+const BOILER =
+  'This work was supported by internal funding. The authors declare no competing interests. Correspondence should be addressed to the first author.';
+
+const MOCK_FIXTURES: Record<string, Record<string, number>> = {
+  [id(ABSTRACT)]: { core: 0.95 },
+  [id(METHOD)]: { core: 0.95 },
+  [id(ACK)]: { core: 0.05 },
+  [id(BOILER)]: { core: 0.05 },
+};
+
+test.describe.configure({ mode: 'serial' });
+
+let ext: LaunchedExtension;
+
+test.beforeAll(async () => {
+  ext = await launchWithExtension();
+  await seedSettings(ext, { providerMode: 'mock', mockFixtures: MOCK_FIXTURES, focus: '' });
+});
+
+test.afterAll(async () => {
+  await ext?.close();
+});
+
+test('Read this page highlights, dims, lists and then stops', async () => {
+  // The article tab has to exist before the popup opens: the `?jd-tab=` hook finds it by URL.
+  const article = await ext.context.newPage();
+  await article.goto(ARTICLE_URL);
+
+  const popup = await ext.context.newPage();
+  await popup.goto(`chrome-extension://${ext.extensionId}/popup.html?jd-tab=${encodeURIComponent(ARTICLE_URL)}`);
+
+  await popup.locator('#read-page').click();
+  await expect(popup.locator('#read-status')).toHaveText('reading 21 passages');
+
+  // The two pinned highlights and the two pinned dims; everything else is whatever the mock's
+  // text-overlap heuristic made of it, which is why the counts below are relative, not absolute.
+  await expect(article.locator('#p-abstract')).toHaveClass(/jd-hl/);
+  await expect(article.locator('#p-method-1')).toHaveClass(/jd-hl/);
+  await expect(article.locator('#p-ack')).toHaveClass(/jd-dim/);
+  await expect(article.locator('#p-boiler')).toHaveClass(/jd-dim/);
+  await expect(article.locator('#p-abstract .jd-rtag')).toHaveText(/95%$/);
+
+  // Playwright's CSS engine pierces the panel's open shadow root, so the list is addressable here.
+  const highlights = await article.locator('.jd-hl').count();
+  expect(highlights).toBeGreaterThanOrEqual(2);
+  await expect(article.locator('#jd-reader ol li')).toHaveCount(highlights);
+  await expect(article.locator('#jd-reader .progress')).toHaveText(/^21 passages · /);
+
+  await article.getByRole('button', { name: 'Show all' }).click();
+  await expect(article.locator('.jd-dim')).toHaveCount(0);
+
+  // Reading is a toggle: the same injection stops it and puts the page back exactly as it was.
+  await popup.locator('#read-page').click();
+  await expect(popup.locator('#read-status')).toHaveText('stopped');
+  await expect(article.locator('.jd-hl')).toHaveCount(0);
+  await expect(article.locator('.jd-rtag')).toHaveCount(0);
+  await expect(article.locator('#jd-reader')).toHaveCount(0);
+
+  await popup.close();
+  await article.close();
+});
+
+test('a page that is not an article is left alone, and the popup says so', async () => {
+  const page = await ext.context.newPage();
+  await page.goto(`${FIXTURE_ORIGIN}/generic.html`); // a timeline of short statuses, not a document
+
+  const popup = await ext.context.newPage();
+  await popup.goto(`chrome-extension://${ext.extensionId}/popup.html?jd-tab=${encodeURIComponent(`${FIXTURE_ORIGIN}/generic.html`)}`);
+
+  await popup.locator('#read-page').click();
+  await expect(popup.locator('#read-status')).toHaveText(/^this page does not look like an article \(\d+ passages\)$/);
+  await expect(page.locator('#jd-reader')).toHaveCount(0);
+  await expect(page.locator('.jd-hl, .jd-dim')).toHaveCount(0);
+
+  await popup.close();
+  await page.close();
+});

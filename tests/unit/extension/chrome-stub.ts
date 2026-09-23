@@ -46,17 +46,20 @@ export interface ChromeStub {
   dispatch(message: unknown, sender: unknown): Promise<unknown>;
   /** What `chrome.tabs.query` resolves to; the popup reads `[0].id` (to pick its tab's page-seen
    * report) and `[0].url` (to drive the This-site section — readable thanks to `activeTab`). */
-  setTabs(tabs: Array<{ id?: number; url?: string }>): void;
+  setTabs(tabs: Array<{ id?: number; url?: string; title?: string }>): void;
   /** Makes the NEXT `chrome.permissions.request(...)` call resolve `false` (as if the user dismissed
    * Chrome's own permission prompt) without granting anything, then reverts to the default (grant
    * whatever was asked). One-shot, mirroring how a test drives one specific click. */
   denyNextPermissionRequest(): void;
+  /** Every url passed to `chrome.tabs.create`, oldest first. */
+  createdTabs(): string[];
 }
 
 export function installChromeStub(): ChromeStub {
   const listeners: Listener[] = [];
   let lastError: { message: string } | undefined;
-  let tabs: Array<{ id?: number; url?: string }> = [];
+  let tabs: Array<{ id?: number; url?: string; title?: string }> = [];
+  const createdTabs: string[] = [];
 
   // In-memory stand-in for the origin patterns Chrome would actually hold host permission for (e.g.
   // "https://mastodon.social/*"), and for the extension's dynamically registered content scripts,
@@ -110,6 +113,11 @@ export function installChromeStub(): ChromeStub {
       const ids = new Set(filter.ids);
       return all.filter((s) => ids.has(s.id));
     },
+    /** Injection always "succeeds" with no completion value; a test that cares spies on this and
+     * resolves whatever ReadResult it wants to exercise. */
+    async executeScript(): Promise<Array<{ result?: unknown }>> {
+      return [{ result: undefined }];
+    },
   };
 
   const runtime = {
@@ -150,8 +158,14 @@ export function installChromeStub(): ChromeStub {
     storage: { local: createStorageArea(), session: createStorageArea() },
     runtime,
     tabs: {
-      async query(): Promise<Array<{ id?: number; url?: string }>> {
-        return tabs;
+      /** `query({url})` is how the popup's `?jd-tab=` hook names a tab instead of taking the active
+       * one; every other query answers with whatever `setTabs` was given. */
+      async query(info?: { url?: string }): Promise<Array<{ id?: number; url?: string; title?: string }>> {
+        return info?.url === undefined ? tabs : tabs.filter((t) => t.url === info.url);
+      },
+      async create(props: { url: string }): Promise<{ id: number }> {
+        createdTabs.push(props.url);
+        return { id: 999 };
       },
     },
     permissions,
@@ -174,5 +188,6 @@ export function installChromeStub(): ChromeStub {
     denyNextPermissionRequest() {
       denyNextRequest = true;
     },
+    createdTabs: () => [...createdTabs],
   };
 }

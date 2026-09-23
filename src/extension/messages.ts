@@ -4,6 +4,7 @@
 // and only the service worker (with host permissions) is exempt.
 
 import type { DuoStats } from '../core/duo';
+import type { DocContext, Passage, ReadingVerdict } from '../core/reading';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
 
 export type SiteId = 'x' | 'reddit' | 'hn';
@@ -22,6 +23,7 @@ export interface Settings {
   pack?: QuestionPack;
   strictness: number; // 0..1, default 0.5
   arbiter: boolean; // default true
+  focus: string; // reading mode's "what are you looking for?", inlined into the focus question; default ''
   enabledSites: Record<SiteId, boolean>; // default all true
   genericSites: string[]; // origins (e.g. "https://mastodon.social") the user opted the generic adapter into; default []
   mockFixtures?: Record<string, Record<string, number>>; // test hook
@@ -33,6 +35,7 @@ export const DEFAULT_SETTINGS: Settings = {
   intent: '',
   strictness: 0.5,
   arbiter: true,
+  focus: '',
   enabledSites: { x: true, reddit: true, hn: true },
   genericSites: [],
 };
@@ -73,7 +76,11 @@ export type Request =
   // both are refused for a content-script sender (only the popup may change which sites are enabled);
   // unlike `getState`, they carry no secrets, so the refusal is about write access, not privacy.
   | { type: 'enableSite'; origin: string }
-  | { type: 'disableSite'; origin: string };
+  | { type: 'disableSite'; origin: string }
+  // Reading mode (design addendum §9). Unlike `judge` this needs no compiled pack and is not gated by
+  // enabledSites/genericSites: the user clicked Read on this document, and the click is the consent.
+  // Any sender may call it — the reply carries probabilities about text the sender already has.
+  | { type: 'readPassages'; ctx: DocContext; passages: Passage[] };
 
 export type Response =
   | { ok: true; type: 'judge'; verdicts: Verdict[] }
@@ -103,6 +110,9 @@ export type Response =
   // `genericSites` is the FULL resulting list (sorted, unique) so the popup never has to derive it
   // locally from the request it just sent.
   | { ok: true; type: 'enableSite' | 'disableSite'; genericSites: string[] }
+  // `focus` is the setting the background actually applied, echoed so the reader panel can show the
+  // question the verdicts answer without reading Settings itself (a content script may not).
+  | { ok: true; type: 'readPassages'; focus: string; verdicts: ReadingVerdict[]; usageTokens: number; errors: number }
   | { ok: false; error: string };
 
 /** Wraps `chrome.runtime.sendMessage` in a Promise: resolves `{ok:false,error}` (never rejects) when

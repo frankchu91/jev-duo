@@ -7,7 +7,7 @@ import type { DuoStats } from '../../../src/core/duo';
 import type { QuestionPack } from '../../../src/core/types';
 import type { PageSeenReport, Request, Response, Settings, send } from '../../../src/extension/messages';
 import { initPopup } from '../../../src/extension/popup/popup';
-import { installChromeStub, type ChromeStub } from './chrome-stub';
+import { EXTENSION_ORIGIN, installChromeStub, type ChromeStub } from './chrome-stub';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HTML = readFileSync(path.resolve(__dirname, '../../../src/extension/popup/popup.html'), 'utf8');
@@ -60,6 +60,7 @@ const SETTINGS: Settings = {
   pack: PACK,
   strictness: 0.5,
   arbiter: true,
+  focus: '',
   enabledSites: { x: true, reddit: true, hn: true },
   genericSites: [],
 };
@@ -885,6 +886,176 @@ describe('initPopup', () => {
       expect(el(doc, 'site-origin').textContent).toBe('https://mastodon.social');
       expect(el(doc, 'site-status').textContent).toBe('enabled');
 
+      doc.dispatchEvent(new Event('unload'));
+    });
+  });
+
+  // --- Reading mode (design addendum §7): the "Read this page" section ---
+
+  describe('#reading', () => {
+    /** Installs the stub with one active tab, optionally alongside other tabs the `?jd-tab=` hook
+     * could name instead. */
+    function withTabs(tabs: Array<{ id?: number; url?: string; title?: string }>): ChromeStub {
+      const stub = installChromeStub();
+      stub.setTabs(tabs);
+      return stub;
+    }
+
+    /** Spies on the stub's executeScript, recording the injection and resolving `result` as Chrome's
+     * InjectionResult would. The cast narrows chrome.scripting to the one method being mocked. */
+    function spyOnExecuteScript(result: unknown) {
+      const { scripting } = (globalThis as unknown as { chrome: { scripting: { executeScript(o: unknown): Promise<unknown> } } }).chrome;
+      return vi.spyOn(scripting, 'executeScript').mockResolvedValue([{ result }]);
+    }
+
+    const stateSend = () => makeFakeSend((req) => (req.type === 'getState' ? getStateResponse({ focus: 'why does it work' }) : { ok: true, type: 'setSettings' }));
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      delete (globalThis as { chrome?: unknown }).chrome;
+    });
+
+    it('fills the focus box from settings and saves it 300ms after the last keystroke', async () => {
+      vi.useFakeTimers();
+      withTabs([{ id: 7, url: 'https://example.test/post' }]);
+      const doc = loadDoc();
+      const calls: Request[] = [];
+      const send = makeFakeSend((req) => {
+        calls.push(req);
+        return req.type === 'getState' ? getStateResponse({ focus: 'why does it work' }) : { ok: true, type: 'setSettings' };
+      });
+      await initPopup(doc, { send: asSend(send) });
+
+      const focus = el<HTMLInputElement>(doc, 'focus');
+      expect(focus.value).toBe('why does it work');
+
+      focus.value = 'how is position represented';
+      focus.dispatchEvent(new Event('input'));
+      await vi.advanceTimersByTimeAsync(299);
+      expect(calls.filter((c) => c.type === 'setSettings')).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const patches = calls.filter((c) => c.type === 'setSettings').map((c) => (c.type === 'setSettings' ? c.patch : undefined));
+      expect(patches).toEqual([{ focus: 'how is position represented' }]);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('offers Read this page on an ordinary http(s) page', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/post' }]);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').hidden).toBe(false);
+      expect(el<HTMLButtonElement>(doc, 'read-page').disabled).toBe(false);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').hidden).toBe(true);
+      expect(el(doc, 'read-status').textContent).toBe('');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it.each(['https://example.test/paper.PDF', 'https://arxiv.org/pdf/1706.03762'])('offers Read this PDF for %s', async (url) => {
+      withTabs([{ id: 7, url }]);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').hidden).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').hidden).toBe(false);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('disables Read this page on a chrome:// tab and says why', async () => {
+      withTabs([{ id: 7, url: 'chrome://extensions/' }]);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').disabled).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').hidden).toBe(true);
+      expect(el(doc, 'read-status').textContent).toBe('not a web page');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('injects read-page.js into the active tab and reports the passage count', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/post' }]);
+      const spy = spyOnExecuteScript({ state: 'started', passages: 21 });
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      el<HTMLButtonElement>(doc, 'read-page').click();
+      await flush();
+
+      expect(spy).toHaveBeenCalledWith({ target: { tabId: 7 }, files: ['read-page.js'] });
+      expect(el(doc, 'read-status').textContent).toBe('reading 21 passages');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it.each([
+      [{ state: 'stopped' }, 'stopped'],
+      [{ state: 'no-article', passages: 3 }, 'this page does not look like an article (3 passages)'],
+      [undefined, 'reading'],
+    ])('reports %j as %s', async (result, expected) => {
+      withTabs([{ id: 7, url: 'https://example.test/post' }]);
+      spyOnExecuteScript(result);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      el<HTMLButtonElement>(doc, 'read-page').click();
+      await flush();
+
+      expect(el(doc, 'read-status').textContent).toBe(expected);
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('reports a refused injection, and offers the PDF reader when the tab looks like a PDF', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/download', title: 'paper.pdf' }]);
+      const { scripting } = (globalThis as unknown as { chrome: { scripting: { executeScript(o: unknown): Promise<unknown> } } }).chrome;
+      vi.spyOn(scripting, 'executeScript').mockRejectedValue(new Error('Cannot access contents of the page'));
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      el<HTMLButtonElement>(doc, 'read-page').click();
+      await flush();
+
+      expect(el(doc, 'read-status').textContent).toBe("can't read this tab: Cannot access contents of the page");
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').hidden).toBe(false);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('Read this PDF opens the reader page on the tab url, and the hint link opens it empty', async () => {
+      const stub = withTabs([{ id: 7, url: 'https://example.test/paper.pdf' }]);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      el<HTMLButtonElement>(doc, 'read-pdf').click();
+      el<HTMLAnchorElement>(doc, 'open-reader').click();
+      await flush();
+
+      expect(stub.createdTabs()).toEqual([
+        `${EXTENSION_ORIGIN}/reader.html?src=${encodeURIComponent('https://example.test/paper.pdf')}`,
+        `${EXTENSION_ORIGIN}/reader.html`,
+      ]);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('takes the tab id from tabs.query({url}) under the ?jd-tab= hook', async () => {
+      withTabs([
+        { id: 7, url: `${EXTENSION_ORIGIN}/popup.html?jd-tab=x` },
+        { id: 42, url: 'https://example.test/article' },
+      ]);
+      const spy = spyOnExecuteScript({ state: 'started', passages: 21 });
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()), activeTabUrl: 'https://example.test/article' });
+
+      el<HTMLButtonElement>(doc, 'read-page').click();
+      await flush();
+
+      expect(spy).toHaveBeenCalledWith({ target: { tabId: 42 }, files: ['read-page.js'] });
       doc.dispatchEvent(new Event('unload'));
     });
   });

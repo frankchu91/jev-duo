@@ -170,6 +170,16 @@ button:hover {
   color: var(--muted);
 }
 
+/* Read this page: the hint line under the buttons, and the link into the PDF reader. */
+.jd-hint {
+  color: var(--muted);
+  margin: 6px 0 0;
+}
+
+.jd-hint a {
+  color: var(--muted);
+}
+
 .jd-field {
   display: block;
   margin-top: 6px;

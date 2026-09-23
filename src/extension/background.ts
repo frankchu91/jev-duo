@@ -22,6 +22,8 @@ import { DuoAgent } from '../core/duo';
 import { ExampleStore } from '../core/learner';
 import { resolveProviders } from '../core/providers/resolve';
 import type { JevProvider, LlmProvider } from '../core/providers/types';
+import { ReadingJudge } from '../core/reading-judge';
+import type { DocContext, Passage } from '../core/reading';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
 import type { PagePlatform, PageSeenReport, Request, Response, Sender, Settings } from './messages';
 import { isValidOrigin, reconcileSites, registerSite, unregisterSite } from './sites';
@@ -104,6 +106,17 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
   let hasKeys = false;
   let providers: { jev: string; llm: string } = { jev: 'mock', llm: 'mock' };
   let cache: LruCache<Verdict>;
+
+  // Reading mode's judge (design addendum §9). Its cache key is title|focus|passage text and carries
+  // no provider identity — the same reason the verdict cache above is dropped when the provider
+  // changes — so the whole judge is replaced rather than invalidated. Built LAZILY, on first use, by
+  // handleReadPassages (not eagerly in buildAgent, which runs on every setSettings/resetStats whether
+  // or not reading mode is ever used): `stale` starts true so the first readPassages call constructs
+  // one from whatever settings are live at that moment, and a mockFixtures-only settings change (the
+  // one field buildAgent picks up fresh every time but providersMayHaveChanged deliberately ignores,
+  // same as the verdict cache) is still reflected the next time the judge is (re)built.
+  let readingJudge: ReadingJudge | undefined;
+  let readingJudgeStale = true;
 
   // Latest `pageSeen` report per tab, insertion-ordered oldest -> newest so the cap can drop the
   // least recently reporting tab. Mirrored to chrome.storage.session (and re-read by init) because
@@ -245,6 +258,29 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     }
   }
 
+  /** Reading mode's only handler (§9). Deliberately not queued behind the mutation queue and not
+   * gated on a pack: a reader waiting on a batch of twelve passages must not sit behind a recompile.
+   * `settings.focus` is read here, not passed in, so every reader — the injected one and the PDF page
+   * — asks the same question, and the answer says which one it was.
+   *
+   * The judge itself is (re)built here, lazily, rather than in buildAgent: buildAgent runs on every
+   * setSettings/resetStats regardless of whether reading mode is ever touched, so constructing it
+   * there would either throw it away too eagerly (losing the cache to an unrelated settings change,
+   * were it unconditional) or too rarely (a `mockFixtures`-only change would never reach it, were it
+   * gated on `readingJudgeStale` alone, since providersMayHaveChanged correctly ignores that field).
+   * Building on first use after `readingJudgeStale` flips means the judge always reflects whatever
+   * settings are live the moment it is next needed, while surviving every settings change in between
+   * that didn't actually change the provider — which is what lets its own cache do its job. */
+  async function handleReadPassages(ctx: DocContext, passages: Passage[]): Promise<Response> {
+    const focus = settings.focus;
+    if (readingJudgeStale || !readingJudge) {
+      readingJudge = new ReadingJudge(resolveForSettings(settings, deps.fetchImpl).jev);
+      readingJudgeStale = false;
+    }
+    const { verdicts, usageTokens, errors } = await readingJudge.judge(ctx, focus, passages);
+    return { ok: true, type: 'readPassages', focus, verdicts, usageTokens, errors };
+  }
+
   async function handleCompile(intent: string): Promise<Response> {
     const current = agent;
     const pack = await current.compile(intent);
@@ -296,6 +332,7 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       // cache and its chrome.storage.session mirror.
       cache = new LruCache<Verdict>(MAX_VERDICTS);
       await saveVerdicts([]);
+      readingJudgeStale = true; // the reading cache has no provider identity either (§9)
     }
 
     await rebuildAgent(saved);
@@ -358,6 +395,8 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     switch (req.type) {
       case 'judge':
         return handleJudge(req.items);
+      case 'readPassages':
+        return handleReadPassages(req.ctx, req.passages);
       case 'compile':
         return enqueueMutation(() => handleCompile(req.intent));
       case 'recompile':
