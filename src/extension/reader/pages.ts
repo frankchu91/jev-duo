@@ -197,6 +197,12 @@ export function mountPageRenderer(deps: PageRendererDeps): PageRenderer {
       entry.canvas.height = 0;
       drawn.delete(page);
     }
+    // A page queued during a fast scroll can be far from the viewport by the time it would reach the
+    // front of the FIFO — rasterising it then would be wasted work for a page nobody is looking at, so
+    // it is dropped from the queue itself rather than left to be drawn and immediately released.
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (distanceFromVisible(queue[i]) > RELEASE_PAGE_DISTANCE) queue.splice(i, 1);
+    }
   }
 
   function enqueue(page: number): void {
@@ -226,18 +232,53 @@ export function mountPageRenderer(deps: PageRendererDeps): PageRenderer {
     }
   }
 
+  /** The other half of `showText`: a page that failed once and is later drawn successfully (a resize
+   * retry, or scrolling away and back) is not permanently stuck showing text. Idempotent — a page that
+   * never failed has nothing to undo here — and, like `showText`, keeps any `.jd-rtag` the panel had
+   * already appended. */
+  function clearFailure(entry: PageSection): void {
+    entry.section.classList.remove('jd-render-failed');
+    for (const block of entry.blocks) {
+      if (!block.el.classList.contains('jd-block-text')) continue;
+      const tags = [...block.el.querySelectorAll('.jd-rtag')];
+      block.el.textContent = '';
+      block.el.classList.remove('jd-block-text');
+      for (const tag of tags) block.el.appendChild(tag);
+    }
+  }
+
   async function draw(page: number): Promise<void> {
     const entry = byPage.get(page);
     if (!entry) return;
+    // A page can sit in the queue long enough, behind RENDER_CONCURRENCY others, for the viewport to
+    // have moved on by the time it is finally dequeued (`release` above prunes what it can when
+    // visibility changes, but a page re-queued by a resize — `onResized` below — never goes through
+    // that path at all). Checked again here, right before spending a raster on it.
+    if (visible.size > 0 && distanceFromVisible(page) > RELEASE_PAGE_DISTANCE) return;
     inFlight.add(page);
     const cssWidth = entry.section.clientWidth;
+    let staleWidth = false;
     try {
       await renderPage(page, entry.canvas, cssWidth, pixelRatio());
-      if (!destroyed) drawn.set(page, cssWidth);
+      if (!destroyed) {
+        // The section can be resized while this very render is in flight; `cssWidth` above is what it
+        // was asked to draw at, not necessarily what the section measures now. Recording a mismatch as
+        // "drawn" would leave a stale bitmap in place with nothing left to ever notice and fix it.
+        const currentWidth = entry.section.clientWidth;
+        if (currentWidth > 0 && Math.abs(currentWidth - cssWidth) > RESIZE_WIDTH_CHANGE * cssWidth) {
+          staleWidth = true;
+        } else {
+          clearFailure(entry);
+          drawn.set(page, cssWidth);
+        }
+      }
     } catch {
       if (!destroyed) showText(entry);
     } finally {
       inFlight.delete(page);
+      // Only after `inFlight` no longer holds this page: `enqueue` refuses a page that looks already
+      // in flight, which — before this delete — it still would.
+      if (staleWidth) enqueue(page);
       pump();
     }
   }

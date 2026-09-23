@@ -341,4 +341,148 @@ describe('mountPageRenderer', () => {
     observer.enter(4); // the fake's notify is gone after disconnect
     expect(renderer.calls).toEqual([1, 2]);
   });
+
+  // --- Review fix round 1, IMPORTANT 2: a fast scroll must not rasterise pages nobody is near any more ---
+
+  it('drops far queued pages once the viewport narrows, without touching nearer queued ones', async () => {
+    const { observer, renderer } = mount(20);
+
+    // 12 pages become visible in quick succession: two start rendering immediately (the concurrency
+    // limit), the other ten queue up behind them.
+    for (let p = 1; p <= 12; p++) observer.enter(p);
+    expect(renderer.calls).toEqual([1, 2]);
+
+    // The viewport narrows to just page 1.
+    for (let p = 2; p <= 12; p++) observer.leave(p);
+
+    renderer.pending[0].resolve(); // page 1's own render finishes
+    renderer.pending[1].resolve(); // page 2's render finishes too — already in flight, not cancelled
+    await flush();
+
+    // 10, 11 and 12 were more than 8 pages from the only page left visible and were dropped from the
+    // queue outright; 3 (well within range) is still worth keeping and gets its turn once a slot frees.
+    expect(renderer.calls).not.toContain(10);
+    expect(renderer.calls).not.toContain(11);
+    expect(renderer.calls).not.toContain(12);
+    expect(renderer.calls).toContain(3);
+  });
+
+  it('skips a page re-queued by a resize if it is far from the viewport once its turn actually comes', async () => {
+    const container = document.createElement('main');
+    const { doc, pages } = bigDoc(60);
+    const { sections } = render(doc, pages, container);
+    setWidth(sections[0].section, 800);
+    const observer = fakeObserver();
+    const renderer = fakeRenderer();
+    let fireResize = (): void => {};
+    const handle = mountPageRenderer({
+      sections,
+      renderPage: renderer.renderPage,
+      observe: observer.factory,
+      onResize: (_s, run) => {
+        fireResize = run;
+        return { disconnect: () => {} };
+      },
+      pixelRatio: () => 2,
+    });
+
+    // Page 1 starts rendering while visible; page 50 fills the only other concurrency slot and stays
+    // pending for the rest of this test, so nothing else can be dequeued on its own.
+    observer.enter(1);
+    observer.enter(50);
+    observer.leave(1); // page 1 scrolls out before its own render finishes — already in flight, not cancelled
+    renderer.pending[0].resolve();
+    await flush();
+    expect(handle.rendered()).toEqual([1]);
+
+    // Resized while page 50 is the only visible section, 49 pages away: `onResized` re-queues page 1
+    // (the one enqueue path that never calls `release`) and `pump` dequeues it in that SAME synchronous
+    // call, since page 50's render is still in flight and never frees a slot in between — so this is
+    // `draw`'s own distance check catching it, not `release`'s queue pruning.
+    setWidth(sections[0].section, 2000);
+    fireResize();
+
+    expect(renderer.calls).toEqual([1, 50]); // no second render call for page 1
+    expect(handle.rendered()).toEqual([]); // dropped by onResized and never redrawn
+  });
+
+  // --- Review fix round 1, minor 3: a render failure must not be permanent ---
+
+  it('a later successful draw clears a previous render failure', async () => {
+    const container = document.createElement('main');
+    const { sections } = render(DOC, PAGES, container);
+    const observer = fakeObserver();
+    const renderer = fakeRenderer();
+    mountPageRenderer({ sections, renderPage: renderer.renderPage, observe: observer.factory, onResize: noResize, pixelRatio: () => 2 });
+
+    observer.enter(1);
+    renderer.pending[0].reject(new Error('canvas context lost'));
+    await flush();
+    expect(sections[0].section.classList.contains('jd-render-failed')).toBe(true);
+    expect(sections[0].blocks[0].el.classList.contains('jd-block-text')).toBe(true);
+
+    // Released and re-approached (scrolling away and back, or a resize retry): this time it succeeds.
+    observer.leave(1);
+    observer.enter(1);
+    renderer.pending[1].resolve();
+    await flush();
+
+    expect(sections[0].section.classList.contains('jd-render-failed')).toBe(false);
+    expect(sections[0].blocks[0].el.classList.contains('jd-block-text')).toBe(false);
+    expect(sections[0].blocks[0].el.textContent).toBe('');
+  });
+
+  it('clearing a render failure preserves a highlight tag already on the overlay', async () => {
+    const container = document.createElement('main');
+    const { sections } = render(DOC, PAGES, container);
+    const tag = document.createElement('span');
+    tag.className = 'jd-rtag';
+    tag.textContent = 'method · 95%';
+    sections[0].blocks[0].el.appendChild(tag);
+    const observer = fakeObserver();
+    const renderer = fakeRenderer();
+    mountPageRenderer({ sections, renderPage: renderer.renderPage, observe: observer.factory, onResize: noResize, pixelRatio: () => 2 });
+
+    observer.enter(1);
+    renderer.pending[0].reject(new Error('canvas context lost'));
+    await flush();
+    expect(sections[0].blocks[0].el.querySelector('.jd-rtag')).toBe(tag);
+
+    observer.leave(1);
+    observer.enter(1);
+    renderer.pending[1].resolve();
+    await flush();
+
+    expect(sections[0].section.classList.contains('jd-render-failed')).toBe(false);
+    expect(sections[0].blocks[0].el.classList.contains('jd-block-text')).toBe(false);
+    expect(sections[0].blocks[0].el.querySelector('.jd-rtag')).toBe(tag); // survives the cleanup too
+  });
+
+  // --- Review fix round 1, minor 6: a resize mid-render must not be recorded as a match ---
+
+  it('re-queues a page whose section is resized while its render is in flight, once the render completes', async () => {
+    const container = document.createElement('main');
+    const { sections } = render(DOC, PAGES, container);
+    setWidth(sections[0].section, 800);
+    const observer = fakeObserver();
+    const renderer = fakeRenderer();
+    const handle = mountPageRenderer({ sections, renderPage: renderer.renderPage, observe: observer.factory, onResize: noResize, pixelRatio: () => 2 });
+
+    observer.enter(1);
+    expect(renderer.calls).toEqual([1]); // in flight, requested at 800
+
+    setWidth(sections[0].section, 1200); // resized mid-render — well past the 25% threshold
+    renderer.pending[0].resolve();
+    await flush();
+
+    // Not recorded as drawn at the now-stale 800px bitmap, and re-queued for a fresh render at 1200.
+    expect(handle.rendered()).toEqual([]);
+    expect(renderer.calls).toEqual([1, 1]);
+
+    renderer.pending[1].resolve();
+    await flush();
+
+    expect(handle.rendered()).toEqual([1]);
+    expect(renderer.calls).toEqual([1, 1]); // the second render wasn't itself resized again, so it sticks
+  });
 });

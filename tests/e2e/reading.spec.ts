@@ -129,20 +129,26 @@ test('the reader page renders a PDF in place and draws the highlights on it', as
     .toBeGreaterThan(0);
   await expect(page.locator('.jd-page').first()).not.toHaveClass(/jd-render-failed/);
 
+  // The progress line only reaches its settled form once the whole run has finished — waited on FIRST,
+  // with a real (retrying) expect, so the `.count()` right after reads a judging run that has actually
+  // stopped rather than a mid-flight snapshot `.count()` itself would never retry to catch up on.
+  await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+
   // The method paragraph is the one MOCK_FIXTURES pins to core 0.95; only highlights are listed, so
   // its row in the panel is also the proof that its overlay carries jd-hl.
   const highlights = await page.locator('.jd-block.jd-hl').count();
   expect(highlights).toBeGreaterThanOrEqual(1);
   await expect(page.locator('#jd-reader ol li')).toHaveCount(highlights);
   await expect(page.locator('#jd-reader ol li', { hasText: 'The method encodes each input token as a vector' })).toHaveCount(1);
-  await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
   await expect(page.locator('#jd-reader p.error')).toHaveText('');
 
   // Clicking a row takes you to its overlay; the flash is the half of that a headless run can assert.
   await page.locator('#jd-reader ol li').first().click();
   await expect(page.locator('.jd-block.jd-flash')).toHaveCount(1);
 
-  // A reader opened in a fresh tab has nothing to go back to.
+  // A reader opened in a fresh tab has nothing to go back to — attached (it still exists) but hidden,
+  // never just "not found", which toBeHidden() alone would not catch.
+  await expect(page.locator('#back')).toBeAttached();
   await expect(page.locator('#back')).toBeHidden();
 
   await page.close();
@@ -188,6 +194,7 @@ test('the reader page reads a PDF picked from disk', async () => {
   await expect(page.locator('h1')).toHaveText('Sample Paper');
   await expect(page.locator('#jd-reader ol li')).not.toHaveCount(0);
   await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+  await expect(page.locator('#back')).toBeAttached();
   await expect(page.locator('#back')).toBeHidden();
 
   await page.close();

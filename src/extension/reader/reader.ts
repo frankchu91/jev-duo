@@ -186,7 +186,9 @@ function wireUp(): void {
   }
 
   /** Drops everything holding the current document: the panel, the canvases' observers, and the pdf.js
-   * worker. Called before a new document is opened, so two are never alive at once. */
+   * worker. Called before a new document is opened, so two are never alive at once — and clears `#doc`
+   * itself, so a document that fails to open outright (below, before `render` ever runs) does not leave
+   * the PREVIOUS document's pages sitting under the new one's error status. */
   async function closeDocument(): Promise<void> {
     handle?.destroy();
     handle = undefined;
@@ -194,26 +196,23 @@ function wireUp(): void {
     renderer = undefined;
     passages = [];
     title = '';
+    docEl.textContent = '';
     const previous = opened;
     opened = undefined;
     await previous?.destroy();
   }
 
   /** bytes -> an open document, rendered in place. Returns false, with the status already set, when
-   * there is nothing to read. */
+   * there is nothing to read. A document with no passages is not retained: its pdf.js document is
+   * destroyed and `opened` is left undefined, so a later Read press goes through this function again
+   * instead of finding `opened` truthy and reaching for a `passages[0]` that does not exist. */
   async function openDocument(data: ArrayBuffer): Promise<boolean> {
+    let pdf: OpenedPdf;
     let doc: PdfDoc;
     try {
       // A COPY: pdf.js transfers the typed array it is given to its worker, which detaches the buffer.
-      const pdf = await openPdf(data.slice(0), pdfjs, pdfAssets());
-      opened = pdf;
+      pdf = await openPdf(data.slice(0), pdfjs, pdfAssets());
       doc = pagesToBlocks(pdf.pages, pdf.metaTitle ?? fileNameOf(sourceName));
-      const built = render(doc, pdf.pages, docEl);
-      passages = built.passages;
-      renderer = mountPageRenderer({
-        sections: built.sections,
-        renderPage: (n, canvas, cssWidth, pixelRatio) => pdf.renderPage(n, canvas, cssWidth, pixelRatio),
-      });
     } catch (err) {
       // A corrupt file, a PDF pdf.js refuses without a password, or an HTML interstitial served at a
       // `.pdf` URL all reject here rather than resolving — caught so the status recovers instead of
@@ -221,11 +220,19 @@ function wireUp(): void {
       setStatus(parseErrorStatus(err), true);
       return false;
     }
-    title = doc.title;
-    if (passages.length === 0) {
+    const built = render(doc, pdf.pages, docEl);
+    if (built.passages.length === 0) {
+      await pdf.destroy();
       setStatus(NO_TEXT_STATUS, true);
       return false;
     }
+    opened = pdf;
+    passages = built.passages;
+    title = doc.title;
+    renderer = mountPageRenderer({
+      sections: built.sections,
+      renderPage: (n, canvas, cssWidth, pixelRatio) => pdf.renderPage(n, canvas, cssWidth, pixelRatio),
+    });
     return true;
   }
 
