@@ -44,8 +44,9 @@ export class ReadingJudge {
   }
 
   /** Judges every passage. Never rejects: one passage's failure is its own plain verdict and nothing
-   * else's problem. `verdicts` comes back in passage order however the calls finished; `onVerdict`
-   * fires as each one resolves, which is what lets the panel fill in while the rest is still running. */
+   * else's problem. `verdicts` comes back in passage order however the calls finished, one per input
+   * passage; `onVerdict` fires once per passage as each one resolves, which is what lets the panel fill
+   * in while the rest is still running. */
   async judge(ctx: DocContext, focus: string, passages: Passage[], onVerdict?: (v: ReadingVerdict) => void): Promise<ReadingRun> {
     const started = Date.now();
     const hasFocus = focus.trim() !== '';
@@ -55,17 +56,39 @@ export class ReadingJudge {
     let usageTokens = 0;
     let errors = 0;
 
+    // One call per DISTINCT id (§3: `rd:` + fnv1a of the first 300 characters), not per passage. A
+    // document that repeats a paragraph verbatim — a legal note, a quoted block, a boilerplate footer —
+    // hands the same id to every copy, and the cache cannot collapse them on its own: nothing is stored
+    // until a call RESOLVES, and every passage checks the cache before any of them has an answer, so all
+    // of them missed and all of them were billed. Verdicts are keyed by id everywhere downstream (the
+    // reader decorates by id), so a per-copy verdict could never have said anything different anyway.
+    const groups = new Map<string, { passage: Passage; at: number[] }>();
+    for (const [i, passage] of passages.entries()) {
+      const group = groups.get(passage.id);
+      if (group) group.at.push(i);
+      else groups.set(passage.id, { passage, at: [i] });
+    }
+
+    /** One verdict to every passage that shares its id, still in passage order. Each passage gets its
+     * own copy rather than an alias: this array is handed to callers and structured-cloned across the
+     * extension's message port, and two entries pointing at one object is a trap nobody expects. */
+    const fanOut = (at: number[], verdict: ReadingVerdict): void => {
+      for (const i of at) {
+        const own: ReadingVerdict = { ...verdict };
+        verdicts[i] = own;
+        onVerdict?.(own);
+      }
+    };
+
     await Promise.all(
-      passages.map(async (passage, i) => {
+      [...groups.values()].map(async ({ passage, at }) => {
         const key = await this.keyFor(ctx, focus, passage);
         const cached = key === undefined ? undefined : this.cache.get(key);
         if (cached) {
-          // A hit costs no call and no tokens. The id is re-stamped because two passages with the
-          // same first 300 characters share an id anyway, but a cached entry may have been stored
-          // from a different position in a different document.
-          const hit: ReadingVerdict = { ...cached, id: passage.id };
-          verdicts[i] = hit;
-          onVerdict?.(hit);
+          // A hit costs no call and no tokens. The id is re-stamped defensively: the key is text-shaped
+          // and the id is derived from that same text, so they always agree, but nothing here depends
+          // on that staying true.
+          fanOut(at, { ...cached, id: passage.id });
           return;
         }
 
@@ -75,15 +98,14 @@ export class ReadingJudge {
           const verdict = decideReading(passage.id, res.answers, hasFocus);
           usageTokens += res.usage?.inputTokens ?? 0;
           if (key !== undefined) this.cache.set(key, verdict);
-          verdicts[i] = verdict;
-          onVerdict?.(verdict);
+          fanOut(at, verdict);
         } catch {
           // Fail open (§2): the passage is shown exactly as the document rendered it. Never cached —
-          // a transient failure must not pin a passage to "plain" for the rest of the session.
-          errors += 1;
-          const failed: ReadingVerdict = { id: passage.id, verdict: 'plain', p: 0.5, core: 0.5, error: true };
-          verdicts[i] = failed;
-          onVerdict?.(failed);
+          // a transient failure must not pin a passage to "plain" for the rest of the session. Counted
+          // once per passage, not once per call: `errors` is what the panel's "N errors" line sits
+          // next to "M passages", and every one of these passages did go unjudged.
+          errors += at.length;
+          fanOut(at, { id: passage.id, verdict: 'plain', p: 0.5, core: 0.5, error: true });
         } finally {
           release();
         }

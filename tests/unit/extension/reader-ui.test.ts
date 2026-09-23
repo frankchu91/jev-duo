@@ -256,6 +256,101 @@ describe('mountReader lifecycle', () => {
   });
 });
 
+// --- Final wave, IMPORTANT: §3's id is fnv1a over the passage's first 300 characters, so a document
+// that repeats a paragraph verbatim hands several passages ONE id. The panel used to index them in a
+// Map<string, ArticlePassage>, which keeps only the last: one paragraph collected every tag and the
+// other copies stayed plain, while the list scrolled every row to that same element. ---
+
+describe('mountReader with passages that share an id', () => {
+  /** `n` identical paragraphs, which is what `passageId` collapses onto a single id. */
+  function docWithDuplicates(n: number, id = 'rd:same'): { doc: Document; passages: ArticlePassage[] } {
+    const doc = new DOMParser().parseFromString('<html><head></head><body></body></html>', 'text/html');
+    const text = 'The same legal note, repeated verbatim in several places in this document.';
+    const passages: ArticlePassage[] = [];
+    for (let i = 0; i < n; i++) {
+      const el = doc.createElement('p');
+      el.id = `p${i}`;
+      el.textContent = text;
+      doc.body.appendChild(el);
+      passages.push({ id, index: i, text, el });
+    }
+    return { doc, passages };
+  }
+
+  it('highlights every element sharing the id, with one tag and one list row each', () => {
+    const { doc, passages } = docWithDuplicates(10);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+
+    handle.apply(verdict('rd:same', 'highlight', { kind: 'boilerplate' }));
+
+    expect(doc.querySelectorAll('.jd-hl')).toHaveLength(10);
+    expect(doc.querySelectorAll('.jd-rtag')).toHaveLength(10);
+    for (const passage of passages) expect(passage.el.querySelectorAll('.jd-rtag')).toHaveLength(1);
+    expect(panelOf(doc).querySelectorAll('li')).toHaveLength(10);
+  });
+
+  it('applies an id once however many verdicts carry it — the judge returns one per passage', () => {
+    const { doc, passages } = docWithDuplicates(10);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+
+    // Exactly what runReading does with the judge's fan-out: ten verdicts, all the same id.
+    for (const passage of passages) handle.apply(verdict(passage.id, 'highlight', { kind: 'boilerplate' }));
+
+    expect(doc.querySelectorAll('.jd-hl')).toHaveLength(10);
+    expect(doc.querySelectorAll('.jd-rtag')).toHaveLength(10); // not 100
+    expect(panelOf(doc).querySelectorAll('li')).toHaveLength(10);
+  });
+
+  it('dims every element sharing the id, and Show all brings all of them back', () => {
+    const { doc, passages } = docWithDuplicates(4);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+
+    handle.apply(verdict('rd:same', 'dim'));
+    expect(doc.querySelectorAll('.jd-dim')).toHaveLength(4);
+
+    [...panelOf(doc).querySelectorAll('button')].find((b) => b.textContent === 'Show all')?.click();
+    expect(doc.querySelectorAll('.jd-dim')).toHaveLength(0);
+  });
+
+  it('gives each row its own element to scroll to', () => {
+    const { doc, passages } = docWithDuplicates(3);
+    const scrolls = passages.map(() => vi.fn());
+    passages.forEach((p, i) => Object.assign(p.el, { scrollIntoView: scrolls[i] }));
+    mountReader(doc, { passages, focus: '', onClose: () => {} }).apply(verdict('rd:same', 'highlight'));
+
+    const rows = [...panelOf(doc).querySelectorAll('li')];
+    rows[2].dispatchEvent(new MouseEvent('click'));
+
+    expect(scrolls.map((s) => s.mock.calls.length)).toEqual([0, 0, 1]);
+    expect(passages[2].el.classList.contains('jd-flash')).toBe(true);
+    expect(passages[0].el.classList.contains('jd-flash')).toBe(false);
+  });
+
+  it('keeps the list in document order when duplicates are interleaved with unique passages', () => {
+    const { doc, passages } = docWithDuplicates(3);
+    passages[1].id = 'rd:other';
+    passages[1].el.textContent = 'A different paragraph entirely, sitting between the two copies.';
+    passages[1].text = passages[1].el.textContent;
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+
+    handle.apply(verdict('rd:other', 'highlight', { kind: 'claim' }));
+    handle.apply(verdict('rd:same', 'highlight', { kind: 'boilerplate' }));
+
+    const kinds = [...panelOf(doc).querySelectorAll('li')].map((li) => (li.textContent ?? '').split(' · ')[0]);
+    expect(kinds).toEqual(['boilerplate', 'claim', 'boilerplate']);
+  });
+
+  it('restores every duplicate on destroy', () => {
+    const { doc, passages } = docWithDuplicates(5);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    handle.apply(verdict('rd:same', 'highlight', { kind: 'boilerplate' }));
+
+    handle.destroy();
+
+    expect(doc.querySelectorAll('.jd-hl, .jd-dim, .jd-rtag')).toHaveLength(0);
+  });
+});
+
 describe('runReading', () => {
   const ctx: DocContext = { title: 'T', lead: 'L', source: 'https://example.test/p' };
 

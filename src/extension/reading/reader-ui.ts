@@ -77,7 +77,19 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
   style.textContent = READER_CSS;
   (host.head ?? host.body).appendChild(style);
 
-  const byId = new Map(opts.passages.map((p) => [p.id, p]));
+  // A LIST per id, not one passage: §3's id is fnv1a over the passage's first 300 characters, so every
+  // verbatim repeat of a paragraph — a legal note, a quoted block, a boilerplate footer — shares one
+  // id. Keeping only the last of them gave that one element every tag and left its twins plain, and
+  // every list row scrolled to it. The document's order is the insertion order here.
+  const byId = new Map<string, ArticlePassage[]>();
+  for (const passage of opts.passages) {
+    const group = byId.get(passage.id);
+    if (group) group.push(passage);
+    else byId.set(passage.id, [passage]);
+  }
+  // The judge returns one verdict per passage, so a group of N copies produces N identical verdicts;
+  // the first one decorates the whole group and the rest are nothing new to do.
+  const applied = new Set<string>();
   const tags: Element[] = [];
   const dimmed: Element[] = [];
   const listedIndexes: number[] = [];
@@ -161,21 +173,29 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
 
   function apply(v: ReadingVerdict): void {
     if (destroyed) return; // a verdict for a panel that is already gone: nothing left to decorate
-    const passage = byId.get(v.id);
-    if (!passage) return; // a verdict for a document that has already been replaced
+    const group = byId.get(v.id);
+    if (!group) return; // a verdict for a document that has already been replaced
+    if (applied.has(v.id)) return; // the same verdict again, for another copy of an identical passage
+    applied.add(v.id);
     if (v.verdict === 'highlight') {
-      passage.el.classList.add('jd-hl');
-      const tag = host.createElement('span');
-      tag.className = 'jd-rtag';
-      tag.textContent = v.kind ? `${v.kind} · ${pct(v.p)}` : pct(v.p);
-      passage.el.appendChild(tag);
-      tags.push(tag);
-      addToList(passage, v);
+      // Every copy is highlighted and listed — one tag and one row each, so the outline can take you
+      // to the third occurrence of a repeated paragraph rather than always the last.
+      for (const passage of group) {
+        passage.el.classList.add('jd-hl');
+        const tag = host.createElement('span');
+        tag.className = 'jd-rtag';
+        tag.textContent = v.kind ? `${v.kind} · ${pct(v.p)}` : pct(v.p);
+        passage.el.appendChild(tag);
+        tags.push(tag);
+        addToList(passage, v);
+      }
       return;
     }
     if (v.verdict !== 'dim') return; // plain passages are left exactly as the document rendered them
-    dimmed.push(passage.el);
-    if (!showingAll) passage.el.classList.add('jd-dim');
+    for (const passage of group) {
+      dimmed.push(passage.el);
+      if (!showingAll) passage.el.classList.add('jd-dim');
+    }
   }
 
   showAll.addEventListener('click', () => {
