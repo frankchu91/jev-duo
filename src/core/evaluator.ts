@@ -19,7 +19,7 @@ const describeError = (e: unknown): string => (e instanceof Error ? e.message : 
 
 /** Counting semaphore: `acquire()` resolves with a `release()` callback once a slot is free. Keeps
  * at most `max` callers running past their `await acquire()` at any time; excess callers queue FIFO. */
-function semaphore(max: number): () => Promise<() => void> {
+export function semaphore(max: number): () => Promise<() => void> {
   let active = 0;
   const queue: Array<() => void> = [];
   return () =>

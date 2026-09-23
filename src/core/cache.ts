@@ -41,11 +41,15 @@ function toHex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** sha256(pack.compiledAt + '|' + item.id + '|' + item.text) as lowercase hex, via the Web Crypto API
- * (`globalThis.crypto.subtle`, not `node:crypto`) so this runs unchanged in Node 20+ and in a browser
- * extension service worker. */
-export async function verdictKey(pack: QuestionPack, item: Item): Promise<string> {
-  const input = `${pack.compiledAt}|${item.id}|${item.text}`;
+/** sha256(`input`) as lowercase hex, via the Web Crypto API (`globalThis.crypto.subtle`, not
+ * `node:crypto`) so this runs unchanged in Node 20+, in a browser extension service worker and in a
+ * content script. Shared by the feed evaluator's verdict key and the reading judge's passage key. */
+export async function sha256Hex(input: string): Promise<string> {
   const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
   return toHex(digest);
+}
+
+/** sha256(pack.compiledAt + '|' + item.id + '|' + item.text). */
+export async function verdictKey(pack: QuestionPack, item: Item): Promise<string> {
+  return sha256Hex(`${pack.compiledAt}|${item.id}|${item.text}`);
 }
