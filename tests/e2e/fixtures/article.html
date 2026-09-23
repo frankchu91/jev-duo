@@ -1,0 +1,91 @@
+<!doctype html>
+<!--
+  An arXiv-like paper page for reading mode (design addendum §5/§12): 21 qualifying passages — the
+  abstract plus four sections of five paragraphs — inside one <article>, with every shape that must
+  NOT become a passage around them: a nav blurb, a figure caption, three hidden paragraphs, a
+  bibliography of <li> (never <p>), and a footer. The paragraph texts are literal one-liners because
+  tests/e2e/reading.spec.ts derives passage ids from them by hand.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Attention Layers for Long Documents</title>
+  </head>
+  <body>
+    <nav>
+      <a href="/">Home</a>
+      <p>Browse by subject, by month, or by author; this navigation blurb is long enough to qualify on length alone and must still never be read.</p>
+    </nav>
+
+    <article>
+      <h1>Attention Layers for Long Documents</h1>
+
+      <p id="p-abstract">We study how attention layers behave on documents far longer than the window they were trained on, and show that a fixed sinusoidal encoding degrades more gracefully than a learned one.</p>
+
+      <figure>
+        <p>Figure 1 shows the attention mass assigned to each position as the document grows past the training window.</p>
+        <figcaption>Figure 1: attention mass per position, averaged over four hundred documents.</figcaption>
+      </figure>
+
+      <p hidden>This paragraph is hidden with the hidden attribute and is long enough to qualify on length alone.</p>
+      <p aria-hidden="true">This paragraph is hidden from assistive technology and is long enough to qualify on length alone.</p>
+      <p style="display:none">This paragraph is display none and is long enough to qualify on length alone as well.</p>
+
+      <section>
+        <h2>1 Introduction</h2>
+        <p id="p-intro-1">Long documents break the assumption that every position can be compared with every other one, because the cost of doing so grows with the square of the length.</p>
+        <p id="p-intro-2">Most deployed readers therefore truncate, and a truncated document quietly loses whichever section happened to fall past the cutoff.</p>
+        <p id="p-intro-3">We take the opposite approach and keep the whole document, paying for it with a cheaper comparison between positions that are far apart.</p>
+        <p id="p-intro-4">The result is a model that answers questions about the last page of a report as accurately as it answers questions about the first one.</p>
+        <p id="p-intro-5">Everything reported here was measured on public documents, and the extraction code used to produce the passages is released with the paper.</p>
+      </section>
+
+      <section>
+        <h2>2 Method</h2>
+        <p id="p-method-1">The method encodes each input token as a vector, adds a positional signal to it, and then applies a stack of attention layers in which every position attends to every other position of the same sequence.</p>
+        <p id="p-method-2">Positional information is represented by fixed sinusoidal functions of the position index, one frequency per embedding dimension.</p>
+        <p id="p-method-3">Each layer is followed by a residual connection and a normalisation step, which keeps the scale of the activations stable as the depth of the stack grows.</p>
+        <p id="p-method-4">We train with a batch of sixty four documents and a learning rate that warms up over the first four thousand steps before decaying.</p>
+        <p id="p-method-5">No part of the training data overlaps with the evaluation documents, which were collected after the training snapshot was frozen.</p>
+      </section>
+
+      <section>
+        <h2>3 Results</h2>
+        <p id="p-results-1">On documents of up to eight thousand tokens the model matches the truncating baseline, which is the range where the baseline still sees everything.</p>
+        <p id="p-results-2">Past that length the baseline falls away quickly, while our model loses less than two points of accuracy out to sixty four thousand tokens.</p>
+        <p id="p-results-3">The gap is largest on questions whose answer appears exactly once, late in the document, which is the case truncation handles worst.</p>
+        <p id="p-results-4">Ablating the sinusoidal encoding in favour of a learned one costs four points at the longest length and nothing at all at the shortest.</p>
+        <p id="p-results-5">We report the median of five runs; the spread between the best and the worst run never exceeded one point on any length.</p>
+      </section>
+
+      <section>
+        <h2>4 Discussion and acknowledgments</h2>
+        <p id="p-disc-1">The experiments here say nothing about generation, which has its own reasons to care about position and was out of scope for this work.</p>
+        <p id="p-disc-2">We expect the same treatment to help retrieval systems that rank whole documents rather than fragments of them.</p>
+        <p id="p-disc-3">The remaining failure cases are almost all tables, which our extraction step flattens into a single run of text before the model ever sees them.</p>
+        <p id="p-ack">We thank our colleagues for their comments on an earlier draft, the reviewers for their careful reading, and the maintainers of the open source libraries this work depends on.</p>
+        <p id="p-boiler">This work was supported by internal funding. The authors declare no competing interests. Correspondence should be addressed to the first author.</p>
+      </section>
+
+      <h2>References</h2>
+      <ul class="bib">
+        <li>Author A and Author B. Sparse attention for very long sequences. In Proceedings of a conference, pages 1 to 12, 2019.</li>
+        <li>Author C. Learned position embeddings and what they forget. In Proceedings of another conference, pages 13 to 25, 2020.</li>
+        <li>Author D and Author E. Truncation considered harmful for document question answering. Journal of Reading, 2020.</li>
+        <li>Author F. On the cost of comparing every position with every other position. Journal of Long Inputs, 2021.</li>
+        <li>Author G and Author H. A survey of long context evaluation sets and their many flaws. Surveys Quarterly, 2021.</li>
+        <li>Author I. Residual connections at depth, revisited once more for good measure. Deep Things, 2021.</li>
+        <li>Author J and Author K. Tables are not text, and pretending otherwise is expensive. Structured Data, 2022.</li>
+        <li>Author L. Warmup schedules and the first four thousand steps of everything. Optimisation Notes, 2022.</li>
+        <li>Author M and Author N. Retrieval over whole documents rather than fragments of them. Retrieval Today, 2023.</li>
+        <li>Author O. Sinusoids, still: a defence of fixed positional encodings. Position Papers, 2023.</li>
+        <li>Author P and Author Q. Measuring accuracy at sixty four thousand tokens without cheating. Benchmarks, 2024.</li>
+        <li>Author R. Everything we tried that did not work, in chronological order. Negative Results, 2024.</li>
+      </ul>
+    </article>
+
+    <footer>
+      <p>Copyright 2026 the authors. This footer paragraph is long enough to qualify on length alone and must still be excluded from the passages.</p>
+    </footer>
+  </body>
+</html>

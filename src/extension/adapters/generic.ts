@@ -4,6 +4,7 @@
 
 import { fnv1a } from '../../core/hash';
 import type { Item, ItemMeta } from '../../core/types';
+import { __domText, collapsedText } from '../dom-text';
 import type { Adapter } from './types';
 
 const MIN_SIBLINGS = 4;
@@ -16,10 +17,6 @@ const TEXT_MAX = 2000;
 const LANDMARK_TAGS = new Set(['NAV', 'HEADER', 'FOOTER', 'ASIDE', 'FORM']);
 const LANDMARKS = [...LANDMARK_TAGS].join(', ').toLowerCase();
 const AUTHOR_SELECTORS = ['[rel="author"]', 'a[href*="/@"]', '[class*="author" i]', '[data-author]'];
-const SKIPPED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
-// `\b` after none/hidden rejects "display:nonesuch"/"visibility:hiddenpopup" while still matching
-// "display: none !important" (a boundary sits between "e" and " "/end-of-string either way).
-const HIDDEN_STYLE = /display\s*:\s*none\b|visibility\s*:\s*hidden\b/i;
 // Full-scan throttle (spec §3.5): a full document scan is the only way to discover a group other than
 // the cached one — and, on a page with no cache at all, the only way to discover a first one — so it
 // runs at most this often. Every call in between is either the cheap per-parent recount (a healthy
@@ -28,50 +25,6 @@ const HIDDEN_STYLE = /display\s*:\s*none\b|visibility\s*:\s*hidden\b/i;
 // the throttle entirely.
 const FULL_SCAN_EVERY_CALLS = 20;
 const FULL_SCAN_MIN_INTERVAL_MS = 5000;
-
-function isHidden(el: Element): boolean {
-  return (
-    SKIPPED_TAGS.has(el.tagName) ||
-    el.hasAttribute('hidden') ||
-    el.getAttribute('aria-hidden') === 'true' ||
-    HIDDEN_STYLE.test(el.getAttribute('style') ?? '')
-  );
-}
-
-/** Counts `visibleText` calls since the last `__generic.reset()`; read only by the unit test that
- * pins down "each element's text is walked once per scan" (see `scan`'s memo below). */
-let textWalks = 0;
-
-// Visible text (spec §3.2): `root`'s text minus script/style/noscript/template subtrees and minus any
-// hidden/aria-hidden/inline-hidden element's subtree. Iterative (an explicit stack of {nodes, i} frames,
-// not recursion) so an unusually deep chain of wrapper elements can't blow the call stack; each frame
-// resumes exactly where it left off once the child it just pushed is fully drained, which visits nodes
-// in the same document order recursion would. jsdom has no layout, so this is structural, not real
-// computed visibility. Every reader of text — qualification, the median/tie-break in `scan`, and
-// `extract`'s `text` field — goes through `collapsedText` below.
-function visibleText(root: Element): string {
-  textWalks += 1;
-  if (isHidden(root)) return '';
-  const parts: string[] = [];
-  const stack: Array<{ nodes: NodeListOf<ChildNode>; i: number }> = [{ nodes: root.childNodes, i: 0 }];
-  while (stack.length > 0) {
-    const frame = stack[stack.length - 1];
-    if (frame.i >= frame.nodes.length) {
-      stack.pop();
-      continue;
-    }
-    const child = frame.nodes[frame.i++];
-    if (child.nodeType === Node.TEXT_NODE) parts.push(child.textContent ?? '');
-    else if (child.nodeType === Node.ELEMENT_NODE && !isHidden(child as Element)) {
-      stack.push({ nodes: (child as Element).childNodes, i: 0 });
-    }
-  }
-  return parts.join('');
-}
-
-function collapsedText(el: Element): string {
-  return visibleText(el).replace(/\s+/g, ' ').trim();
-}
 
 // tagName + up to 3 sorted classes; a class with a digit, or longer than 24 chars, is dropped as
 // generated (a thread id, a CSS-module hash) so per-instance classes don't fragment one signature.
@@ -186,12 +139,12 @@ let lastFullScanAt = 0;
  * content.ts or any production code path. */
 export const __generic = {
   now: (): number => Date.now(),
-  textWalks: (): number => textWalks,
+  textWalks: (): number => __domText.walks(),
   reset(): void {
     cache = undefined;
     callsSinceFullScan = 0;
     lastFullScanAt = 0;
-    textWalks = 0;
+    __domText.resetWalks();
   },
 };
 
