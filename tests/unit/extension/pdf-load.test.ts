@@ -2,6 +2,7 @@
 // committed fixture. Everything else about the PDF path is driven from synthetic PageText, so this is
 // specifically the "do our transform/view readings match what pdf.js actually reports?" test.
 
+import { readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +10,9 @@ import { describe, expect, it } from 'vitest';
 import { loadPages, type PdfjsLike } from '../../../src/extension/reading/pdf-load';
 import { pagesToBlocks } from '../../../src/extension/reading/pdf-text';
 
-const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../e2e/fixtures');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const FIXTURES = path.resolve(HERE, '../../e2e/fixtures');
+const ROOT = path.resolve(HERE, '../../..');
 
 /** The specifier goes through a variable so TypeScript does not try to type-resolve a .mjs build that
  * ships no declarations; the shape it has to satisfy is asserted by `PdfjsLike` right here. */
@@ -57,5 +60,26 @@ describe('loadPages on tests/e2e/fixtures/sample.pdf', () => {
     // The line break inside "positional information" is rejoined with a space, and no paragraph is
     // left as a stray single line.
     expect(passages.some((b) => b.text.includes('Positional information is represented by fixed sinusoidal functions of the position index'))).toBe(true);
+  });
+});
+
+// Final wave, IMPORTANT: pdfjs-dist@6 declares `engines.node >= 22.13` while this package publishes
+// `engines.node >= 20`, and the CLI bundle never references pdf.js — only the extension's reader page
+// bundles it. Listed under `dependencies`, it would have broken `npm i -g jev-duo` on Node 20/21 for
+// code the CLI cannot even reach.
+describe('pdfjs-dist packaging', () => {
+  it('is a dev dependency, imported by the reader page and nothing else in src', () => {
+    const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    expect(pkg.dependencies?.['pdfjs-dist']).toBeUndefined();
+    expect(pkg.devDependencies?.['pdfjs-dist']).toBe('^6.3.289');
+
+    const src = path.join(ROOT, 'src');
+    const importers = readdirSync(src, { recursive: true, encoding: 'utf8' })
+      .filter((file) => file.endsWith('.ts'))
+      .filter((file) => /from '(pdfjs-dist)/.test(readFileSync(path.join(src, file), 'utf8')));
+    expect(importers).toEqual([path.join('extension', 'reader', 'reader.ts')]);
   });
 });

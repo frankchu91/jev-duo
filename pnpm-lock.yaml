@@ -11,9 +11,6 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.127.0
         version: 0.127.0(zod@4.6.5)
-      pdfjs-dist:
-        specifier: ^6.3.289
-        version: 6.3.289
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -36,6 +33,9 @@ importers:
       jsdom:
         specifier: ^30.1.0
         version: 30.1.0
+      pdfjs-dist:
+        specifier: ^6.3.289
+        version: 6.3.289
       tsx:
         specifier: ^4.23.15
         version: 4.23.15

@@ -304,7 +304,9 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
 
 ## 10. Build and manifest
 
-- `package.json`: dependency `pdfjs-dist@^6.3.289` (engines: Node ≥ 22.13, which the repo satisfies).
+- `package.json`: **dev** dependency `pdfjs-dist@^6.3.289`. Its own engines are Node ≥ 22.13 while this
+  package publishes `engines.node >= 20`, and only the extension build bundles it — the CLI bundle
+  never references pdf.js — so it must not be a runtime dependency.
 - `scripts/build.mjs`: entries `read-page.ts` (iife → `read-page.js`, with the §8.1 footer) and
   `reader/reader.ts` (esm → `reader.js`); copies `reader/reader.html`, `reader/reader.css`, and
   `node_modules/pdfjs-dist/build/pdf.worker.min.mjs` → `pdf.worker.mjs`.

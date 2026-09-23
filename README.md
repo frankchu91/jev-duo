@@ -330,6 +330,10 @@ pnpm test:e2e     # Playwright, headless, loads the real built extension
 | `pnpm package:ext` | zips `dist/extension` into `jev-duo-extension.zip` |
 | `pnpm check` | typecheck, unit tests and build in one go (the same three steps CI runs before e2e) |
 
+pdf.js (`pdfjs-dist`) is a dev dependency: the extension build bundles it into the reader page (plus
+its worker), while the published CLI bundle contains no pdf.js at all — which is what keeps
+`npm i -g jev-duo` installable on Node 20, below pdf.js's own Node 22.13 floor.
+
 ```
 src/core/          types, policy, evaluator, compiler, arbiter, learner, prompts, providers/
 src/cli/           index.ts, commands/, sources/hn.ts, render.ts
