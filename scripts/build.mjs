@@ -54,6 +54,9 @@ const extEntries = [
   // statement reading the global the bundle just assigned is exactly what is needed. Verified against
   // esbuild 0.28.2, whose BuildOptions declares `footer?: { [type: string]: string }`.
   { entry: 'read-page.ts', out: 'read-page.js', format: 'iife', footer: { js: 'globalThis.__jevDuoReadResult;' } },
+  // The reader page is an ordinary extension page, so its bundle may stay ESM — which matters,
+  // because it carries pdf.js.
+  { entry: path.join('reader', 'reader.ts'), out: 'reader.js', format: 'esm' },
 ];
 for (const { entry, out, format, footer } of extEntries) {
   const outfile = path.join(extDist, out);
@@ -73,11 +76,26 @@ for (const { entry, out, format, footer } of extEntries) {
 
 // (c) Static assets, flattened into dist/extension/ (icons keep their folder,
 // matching the paths declared in manifest.json).
-for (const file of ['manifest.json', path.join('popup', 'popup.html'), path.join('popup', 'popup.css'), 'styles.css']) {
+for (const file of [
+  'manifest.json',
+  path.join('popup', 'popup.html'),
+  path.join('popup', 'popup.css'),
+  path.join('reader', 'reader.html'),
+  path.join('reader', 'reader.css'),
+  'styles.css',
+]) {
   const dest = path.join(extDist, path.basename(file));
   await cp(path.join(extSrc, file), dest);
   outputs.push(rel(dest));
 }
+
+// pdf.js runs its parser in a worker, which must be a file of its own: it is loaded from the
+// extension's own origin (reader.ts points GlobalWorkerOptions.workerSrc at chrome.runtime.getURL),
+// which the default extension CSP allows and which needs no web_accessible_resources entry.
+const workerSrc = path.join(root, 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.min.mjs');
+const workerDest = path.join(extDist, 'pdf.worker.mjs');
+await cp(workerSrc, workerDest);
+outputs.push(rel(workerDest));
 
 const iconsDir = path.join(extSrc, 'icons');
 const icons = (await readdir(iconsDir).catch(() => [])).filter((f) => f.endsWith('.png')).sort();

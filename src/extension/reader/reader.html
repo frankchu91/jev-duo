@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>jev-duo reader</title>
+    <link rel="stylesheet" href="reader.css" />
+  </head>
+  <body>
+    <header class="jd-head">
+      <p id="source" class="jd-source"></p>
+      <p id="arxiv-hint" class="jd-hint" hidden></p>
+      <div class="jd-row">
+        <input type="text" id="focus" placeholder="What are you looking for? (optional)" />
+        <button id="read" type="button">Read</button>
+      </div>
+      <div class="jd-row">
+        <span id="status" class="jd-status"></span>
+        <button id="allow" type="button" hidden></button>
+      </div>
+      <div class="jd-row">
+        <label for="file">Open a PDF from your computer</label>
+        <input type="file" id="file" accept="application/pdf" />
+      </div>
+    </header>
+    <main id="doc"></main>
+    <script type="module" src="reader.js"></script>
+  </body>
+</html>

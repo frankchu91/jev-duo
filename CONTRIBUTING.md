@@ -62,6 +62,14 @@ feed by structural repetition (design addendum `2026-09-21-generic-sites-design.
 rule applies to it — tune the heuristic and `tests/e2e/fixtures/generic.html` moves with it, because
 that Mastodon-like fixture is what proves the tuning still recognises a real feed.
 
+Reading mode has two fixtures of its own. `tests/e2e/fixtures/article.html` is an arXiv-like paper
+with exactly 21 qualifying passages, and every shape that must *not* become one around them (a nav
+blurb, a figure, three hidden paragraphs, a bibliography of `li`, a footer); change the extraction
+rules in `src/extension/reading/article.ts` and that fixture moves with them, because the passage
+count is what proves the rules still recognise a document. `tests/e2e/fixtures/sample.pdf` is
+committed and written by `pnpm fixtures:pdf` (`tests/e2e/fixtures/make-sample-pdf.mjs`), which is
+deterministic — regenerate it rather than editing the bytes, and commit the result.
+
 ## Commits
 
 One logical change per commit. Subject line in the imperative mood with a conventional-commit

@@ -26,6 +26,7 @@ const TYPES: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.jsonl': 'application/x-ndjson; charset=utf-8',
+  '.pdf': 'application/pdf',
 };
 
 /** Resolves a request path inside FIXTURES_DIR, or `undefined` for anything that escapes it. */

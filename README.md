@@ -74,6 +74,9 @@ stderr.
 6. Check the page line under the stats. It reads `N posts seen on <site>` for the tab the popup was
    opened over, or `0 posts seen on this page — the site's layout may have changed` when the
    adapter found nothing, which is what a site redesign looks like from the inside.
+7. Read one document. The popup's **Read this page** button highlights what carries the substance on
+   a long-form page and dims the filler; on a PDF it opens jev-duo's own reader. See
+   [Reading mode](#reading-mode).
 
 ## Other sites
 
@@ -112,6 +115,45 @@ permissions, which is what Chrome may grant from, not what it has granted. Disab
 page loads: a tab that already loaded the script keeps judging until you reload it, which is why the
 popup says `disabled — reload the tab to stop judging`. Post text still goes only to the provider
 you configured, exactly as on the built-in sites.
+
+## Reading mode
+
+Feed mode filters a stream. Reading mode reads *one document* with you: it highlights the passages
+that carry the substance — or that answer a question you type — dims the filler, and gives you a
+clickable outline of the highlights. Same fast brain, one call per passage, no slow brain at all, so
+a TypeSafe-only setup works.
+
+**On a web page.** Open a long-form page, click the jev-duo icon, and press **Read this page**. The
+optional box above it is your question: `how does the caching work` makes "does this answer the
+reader's question?" the thing that decides, instead of "is this substantive?". Highlighted passages
+get a left rule and a tag reading `<kind> · <confidence>`; filler drops to 35 % opacity and comes
+back when you hover it. Nothing is ever hidden. The panel in the bottom-right lists every highlight
+in document order — click one to scroll to it — and has **Show all** (bring the dimmed passages back)
+and **Close**. Pressing **Read this page** a second time puts the page back exactly as it was.
+
+If the page is not a document — a feed, an app shell, a docs page of four short paragraphs — the
+popup says `this page does not look like an article (N passages)` and nothing is touched. Reading
+needs at least 6 paragraphs and 1500 characters inside one container to call something an article.
+
+**On a PDF.** The popup swaps in **Read this PDF** when the tab looks like one (a `.pdf` path, or an
+arXiv `/pdf/` URL); **Open the PDF reader** in the hint line opens the same page empty. The reader
+fetches the PDF, extracts its text — paragraphs rejoined across line breaks, running headers and page
+numbers dropped, two-column pages read in the right order — and reads it exactly as it reads a page,
+with a `p. N` mark before each page's first block. A host that does not send permissive CORS headers
+needs its own permission: the reader says `can't fetch this file from <origin>` and offers **Allow
+access to <origin>**, which asks Chrome for that one origin. **Open a PDF from your computer** reads a
+local file instead, which never touches the network at all. For an arXiv PDF the reader points at the
+HTML version of the same paper, which has real paragraphs and reads better.
+
+**What is sent.** Per passage: the passage text (capped at 1500 characters), the document title and
+its lead (capped at 600). Nothing else — no URL, no page, no surrounding text — and no LLM call is
+made at any point. PDF bytes are fetched by the reader page and never leave the browser. Reading a
+page injects the reader into that one tab under `activeTab`; no new permission is added to the
+manifest for any of this.
+
+**Limits.** Reading is explicit, per document, and never runs on its own. Judgments use fixed
+thresholds — the **Strictness** slider is a feed-mode control and does not apply. A passage whose
+judgment fails or times out is shown plain rather than dimmed. Documents are capped at 600 passages.
 
 ## CLI
 
@@ -256,6 +298,12 @@ Five things that make its job easier:
   recycles a handful of DOM nodes as you scroll) a node that has been reused for a different post can
   keep the fold it was given until the page reloads, since the decision is mounted on the element
   rather than on the post.
+- **Reading mode does not do everything.** No scanned PDFs (a page with no text layer needs OCR,
+  which jev-duo does not do — the reader says so rather than showing an empty document), no `file://`
+  URLs (use **Open a PDF from your computer**), no reading on page load, no figures, math or tables
+  (a table is flattened into one run of text before it is judged, when it is not excluded outright),
+  no comment filtering, no DOCX or EPUB, and no Firefox. The strictness slider does not apply to
+  reading: it uses fixed thresholds.
 - **English first.** The compiler prompt and the mock compiler both assume English intents.
 - **v1 uses Noul questions only.** Jev's Choice and Score primitives are implemented in the provider
   layer but no v1 feature needs them, so nothing sorts or scores your feed yet.

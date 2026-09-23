@@ -97,3 +97,25 @@ test('a page that is not an article is left alone, and the popup says so', async
   await popup.close();
   await page.close();
 });
+
+test('the reader page reads a PDF fetched from a host the manifest allows', async () => {
+  // The e2e's patched manifest declares the fixture origin as a host permission, which is what the
+  // reader page's "Allow access" button would otherwise have to ask for.
+  const page = await ext.context.newPage();
+  await page.goto(`chrome-extension://${ext.extensionId}/reader.html?src=${encodeURIComponent(`${FIXTURE_ORIGIN}/sample.pdf`)}`);
+
+  // Exactly what make-sample-pdf.mjs draws: four paragraphs per page, one page mark per page, and
+  // four headings (the title block plus the three numbered ones).
+  await expect(page.locator('.jd-passage')).toHaveCount(8);
+  await expect(page.locator('.jd-page-mark')).toHaveCount(2);
+  await expect(page.locator('.jd-heading')).toHaveCount(4);
+  await expect(page.locator('h1')).toHaveText('Sample Paper');
+
+  // The method paragraph is the one MOCK_FIXTURES pins to core 0.95 — the same text the generator
+  // draws across three lines on page two, rejoined by the extractor.
+  await expect(page.locator('.jd-passage', { hasText: 'every position attends to every other position' })).toHaveClass(/jd-hl/);
+  await expect(page.locator('#jd-reader ol li')).not.toHaveCount(0);
+  await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+
+  await page.close();
+});
