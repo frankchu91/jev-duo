@@ -149,7 +149,9 @@ HTML version of the same paper, which has real paragraphs and reads better.
 (capped at 200 characters) and its lead (capped at 600). Nothing else — no URL, no page, no
 surrounding text — and no LLM call is made at any point. PDF bytes are fetched by the reader page and
 never leave the browser. Reading a page injects the reader into that one tab under `activeTab`; no new
-permission is added to the manifest for any of this.
+permission is added to the manifest for any of this. The question you type is shown in the reader
+panel, which uses an open shadow root, so a script on the page you are reading can read it back —
+nothing else about you leaves the browser.
 
 **Limits.** Reading is explicit, per document, and never runs on its own. Judgments use fixed
 thresholds — the **Strictness** slider is a feed-mode control and does not apply. A passage whose

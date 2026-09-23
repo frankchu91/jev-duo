@@ -203,7 +203,11 @@ describe('mountReader lifecycle', () => {
 
   it('apply/setFocus/setProgress/finish are all no-ops once destroyed', () => {
     const { doc, passages } = docWith(1);
-    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    const handle = mountReader(doc, { passages, focus: 'the question', onClose: () => {} });
+    // The panel is detached by destroy(), not discarded, so its text is still readable — which is how
+    // this checks that the three setters wrote NOTHING, rather than only that they did not throw.
+    const panel = panelOf(doc);
+    handle.setProgress(3, 9);
     handle.destroy();
 
     expect(handle.isDestroyed()).toBe(true);
@@ -212,10 +216,13 @@ describe('mountReader lifecycle', () => {
     expect(passages[0].el.classList.contains('jd-hl')).toBe(false);
     expect(passages[0].el.querySelector('.jd-rtag')).toBeNull();
 
-    // The panel itself is gone (destroy() already removed it); these must not throw reaching for it.
-    expect(() => handle.setFocus('anything')).not.toThrow();
-    expect(() => handle.setProgress(1, 1)).not.toThrow();
-    expect(() => handle.finish({ ms: 1, usageTokens: 1, errors: 0 })).not.toThrow();
+    handle.setFocus('something else entirely');
+    handle.setProgress(1, 1);
+    handle.finish({ ms: 1, usageTokens: 1, errors: 0 });
+
+    expect(panel.querySelector('.focus')?.textContent).toBe('focus: the question');
+    expect(panel.querySelector('.progress')?.textContent).toBe('3 of 9 judged');
+    expect(panel.querySelectorAll('li')).toHaveLength(0);
   });
 
   it('destroy() is idempotent: a second call does not call onClose again', () => {

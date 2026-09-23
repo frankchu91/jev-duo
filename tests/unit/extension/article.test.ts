@@ -2,9 +2,9 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { passageId } from '../../../src/core/reading';
-import { articleCandidates, extractArticle } from '../../../src/extension/reading/article';
+import { extractArticle, readArticle } from '../../../src/extension/reading/article';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.resolve(__dirname, '../../e2e/fixtures');
@@ -91,13 +91,16 @@ describe('extractArticle container descent', () => {
 // (O(candidates x nodes)), which is quadratic on a flat page — seconds on 5,000 paragraphs. The
 // bottom-up mass map makes this O(candidates x depth) to build and O(1) per node to query.
 describe('extractArticle performance', () => {
-  it('extracts 600 passages from 5,000 flat paragraphs in under 200ms', () => {
+  // 500 ms, not 200: the quadratic version took seconds, so anything in this range catches it, and a
+  // tighter bound only measures how loaded the machine running the suite is. This file shares a CPU
+  // with 40 other test files.
+  it('extracts 600 passages from 5,000 flat paragraphs in under 500ms', () => {
     const doc = parse(paragraphs(5000, 60));
     const start = performance.now();
     const article = extractArticle(doc);
     const elapsed = performance.now() - start;
     expect(article?.passages).toHaveLength(600);
-    expect(elapsed).toBeLessThan(200);
+    expect(elapsed).toBeLessThan(500);
   });
 });
 
@@ -177,29 +180,58 @@ describe('extractArticle context and caps', () => {
   });
 });
 
-describe('articleCandidates', () => {
+// Final wave, M1: read-page.ts used to call extractArticle and then articleCandidates, collapsing the
+// text of every paragraph on the page twice (~105 ms each on 5,000 paragraphs, on the user's own main
+// thread) to answer "not an article (N passages)". readArticle answers both from one walk.
+describe('readArticle', () => {
   it('counts every qualifying paragraph, whatever the container decides', () => {
-    expect(articleCandidates(loadDoc('article.html'))).toHaveLength(21);
-    expect(articleCandidates(parse('<div id="root"></div>'))).toHaveLength(0);
-    expect(articleCandidates(parse('<p>short</p><p>also short</p>'))).toHaveLength(0);
+    expect(readArticle(loadDoc('article.html')).candidates).toBe(21);
+    expect(readArticle(parse('<div id="root"></div>')).candidates).toBe(0);
+    expect(readArticle(parse('<p>short</p><p>also short</p>')).candidates).toBe(0);
+  });
+
+  it('reports the candidate count even when the page is not an article', () => {
+    const { article, candidates } = readArticle(parse(paragraphs(4, 60)));
+    expect(article).toBeUndefined();
+    expect(candidates).toBe(4); // four paragraphs considered, too few to be a document
+  });
+
+  it('returns the same article extractArticle does, plus the count', () => {
+    const doc = loadDoc('article.html');
+    const { article, candidates } = readArticle(doc);
+    expect(article?.passages).toHaveLength(21);
+    expect(candidates).toBe(21);
+    expect(article?.ctx).toEqual(extractArticle(doc)?.ctx);
+  });
+
+  it('collects the paragraphs once, not once per answer', () => {
+    const doc = parse(paragraphs(8, 200));
+    const spy = vi.spyOn(doc.body, 'querySelectorAll');
+
+    const { article, candidates } = readArticle(doc);
+
+    expect(article?.passages).toHaveLength(8);
+    expect(candidates).toBe(8);
+    expect(spy.mock.calls.filter(([selector]) => selector === 'p')).toHaveLength(1);
+    spy.mockRestore();
   });
 });
 
 // Fix round 1, IMPORTANT: `doc.body.querySelectorAll` threw when `doc.body` is null — true at runtime
 // (though TS's lib.dom.d.ts types `Document.body` as non-nullable) for a bare `new Document()` and for
 // any document DOMParser parses as XML rather than HTML, neither of which gets an HTML <body>.
-describe('extractArticle and articleCandidates without a body', () => {
-  it('returns undefined / empty for a document with no body element', () => {
+describe('extractArticle and readArticle without a body', () => {
+  it('returns undefined / zero for a document with no body element', () => {
     const doc = new Document();
     expect(doc.body).toBeNull();
     expect(extractArticle(doc)).toBeUndefined();
-    expect(articleCandidates(doc)).toEqual([]);
+    expect(readArticle(doc)).toEqual({ article: undefined, candidates: 0 });
   });
 
-  it('returns undefined / empty for an XML document parsed without an HTML body', () => {
+  it('returns undefined / zero for an XML document parsed without an HTML body', () => {
     const doc = new DOMParser().parseFromString('<root><child>text</child></root>', 'application/xml');
     expect(doc.body).toBeNull();
     expect(extractArticle(doc)).toBeUndefined();
-    expect(articleCandidates(doc)).toEqual([]);
+    expect(readArticle(doc)).toEqual({ article: undefined, candidates: 0 });
   });
 });

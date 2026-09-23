@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { JevProvider, JevRequest, JevResponse } from '../../../src/core/providers/types';
 import { createMockJev } from '../../../src/core/providers/jev/mock';
 import { passageId, type DocContext, type Passage, type ReadingVerdict } from '../../../src/core/reading';
@@ -41,10 +41,6 @@ function stubJev(opts: { p?: number; usage?: number; gate?: Promise<void> } = {}
 }
 
 describe('ReadingJudge', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it('returns verdicts in passage order and fires onVerdict once per passage', async () => {
     const jev = stubJev();
     const seen: ReadingVerdict[] = [];

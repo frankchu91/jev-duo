@@ -169,7 +169,9 @@ Per page, then joined in page order:
 8. **Title**: the page-1 block with the largest size and ≥ 8 chars, else `fallbackTitle` (the
    PDF's metadata title, else the file name).
 
-Passages are capped at 600 (headings are not counted).
+Passages are capped at 600, and headings at 600 separately: a heading is never judged, so it costs
+nothing against the passage budget, but a 300-slide deck is thousands of short big-text blocks and
+every one of them would otherwise become an `<h2>` in the reader page.
 
 ### 6.2 Loading (`src/extension/reading/pdf-load.ts`)
 
@@ -320,7 +322,10 @@ Reading sends, per passage, the passage text plus the document title and lead (�
 configured Jev provider, and nothing else; no LLM call is made. PDF bytes are fetched by the reader
 page from the URL you opened (or read from the file you picked) and never leave the browser. A PDF
 host without open CORS needs that origin's host permission, which is requested only when you click
-**Allow access**. Reading a page injects the reader into that tab only, under `activeTab`.
+**Allow access**. Reading a page injects the reader into that tab only, under `activeTab`. The focus
+text you typed is echoed in `readPassages` replies and shown in the reader panel, whose shadow root is
+open (§8.2), so a script on the page being read can read it back; nothing else about you leaves the
+browser.
 
 ## 12. Tests
 

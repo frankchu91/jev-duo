@@ -95,6 +95,19 @@ describe('decideReading', () => {
     expect(v).toEqual({ id: 'rd:2', verdict: 'highlight', p: 0.9, core: 0.8, focus: 0.9, kind: 'method' });
   });
 
+  // Final wave: the documented fallback when a focus IS set but the provider dropped the focus
+  // question — `core` stands in for it, rather than the passage silently deciding on 0.
+  it('falls back to core as the decisive probability when a focus answer is missing', () => {
+    const high = decideReading('rd:4', [noul('core', 0.8)], true);
+    expect(high).toEqual({ id: 'rd:4', verdict: 'highlight', p: 0.8, core: 0.8 }); // 0.8 >= the 0.6 focus bar
+    expect(high.focus).toBeUndefined(); // nothing is invented onto the verdict
+
+    // And the same stand-in decides the dim: core 0.2 is under both thresholds.
+    expect(decideReading('rd:5', [noul('core', 0.2)], true).verdict).toBe('dim');
+    // Between the two bars it is plain, exactly as it would be with a focus answer of 0.5.
+    expect(decideReading('rd:6', [noul('core', 0.5)], true).verdict).toBe('plain');
+  });
+
   it('ignores a focus answer when no focus was set', () => {
     const v = decideReading('rd:3', [noul('core', 0.9), noul('focus', 0.1)], false);
     expect(v.p).toBe(0.9);

@@ -195,4 +195,21 @@ describe('pagesToBlocks caps', () => {
     expect(doc.blocks.filter((b) => b.kind === 'passage')).toHaveLength(600);
     expect(doc.blocks.filter((b) => b.kind === 'heading')).toHaveLength(1);
   });
+
+  // Final wave, M7: passages were capped and headings were not, so a 300-slide deck — every slide a
+  // handful of short lines in a big font — rendered thousands of <h2> into the reader page.
+  it('keeps the first 600 headings too, counted separately from the passages', () => {
+    // One "slide" per page: a big short title line, and a body line so the body size stays 10 pt. The
+    // per-slide marker is letters, not a number: normalize() maps digits to '#', so numbered titles at
+    // the same y on 700 pages would all be dropped as running headers before any cap was reached.
+    const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
+    const mark = (i: number): string => `${LETTERS[i % 26]}${LETTERS[Math.floor(i / 26) % 26]}${LETTERS[Math.floor(i / 676) % 26]}`;
+    const pages = Array.from({ length: 700 }, (_, i) =>
+      page(i + 1, [item(`Slide title ${mark(i)}`, 72, 700, 18), item(`${SENTENCE} Body of slide ${mark(i)}.`, 72, 600)]),
+    );
+    const doc = pagesToBlocks(pages, 'fallback');
+    expect(doc.blocks.filter((b) => b.kind === 'heading')).toHaveLength(600);
+    expect(doc.blocks.filter((b) => b.kind === 'passage')).toHaveLength(600);
+    expect(doc.blocks).toHaveLength(1200);
+  });
 });

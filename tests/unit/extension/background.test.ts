@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { verdictKey } from '../../../src/core/cache';
 import { AUTO_RECOMPILE_EVERY } from '../../../src/core/constants';
 import { fnv1a } from '../../../src/core/hash';
+import { MAX_PASSAGES } from '../../../src/core/reading';
 import type { Example, Item, Verdict } from '../../../src/core/types';
 import { createBackground } from '../../../src/extension/background';
 import type { Response as MessageResponse } from '../../../src/extension/messages';
@@ -1021,6 +1022,20 @@ describe('background', () => {
 
       if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
       expect(res.verdicts[0].core).toBe(0.95);
+    });
+
+    // Final wave, M2: the 600-passage cap used to live only where passages are extracted. This handler
+    // answers any sender, so it holds the ceiling itself now.
+    it('judges at most MAX_PASSAGES of an over-long message', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const many = Array.from({ length: MAX_PASSAGES + 50 }, (_, index) => ({ id: `rd:${index}`, index, text: `passage number ${index}` }));
+
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: many });
+
+      if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(res.verdicts).toHaveLength(MAX_PASSAGES);
+      expect(res.verdicts.at(-1)?.id).toBe(`rd:${MAX_PASSAGES - 1}`);
     });
 
     it('throws the judge away when a key changes, so nothing is served from the old provider', async () => {

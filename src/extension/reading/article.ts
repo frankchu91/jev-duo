@@ -39,11 +39,15 @@ function candidatesWithText(body: Element): Array<[Element, string]> {
   return out;
 }
 
-/** Every paragraph that could be a passage, container or not. §8.1's `no-article` result reports this
- * count, which is the difference between "this page is not an article" and "this page has no text". A
- * document with no `body` (an XML document, or a bare `new Document()`) has no candidates at all. */
-export function articleCandidates(doc: Document): Element[] {
-  return doc.body ? candidatesWithText(doc.body).map(([el]) => el) : [];
+/** Both of §8.1's answers from ONE walk of the page: the article when the page is one, and how many
+ * paragraphs were even considered — the difference between "this page is not an article" and "this
+ * page has no text yet" — when it is not. Asking for them separately collapses the text of every
+ * paragraph on the page twice, ~105 ms each on a 5,000-paragraph page, inside the page the user is
+ * reading. A document with no `body` (an XML document, or a bare `new Document()`) has neither. */
+export function readArticle(doc: Document): { article: Article | undefined; candidates: number } {
+  if (!doc.body) return { article: undefined, candidates: 0 };
+  const candidates = candidatesWithText(doc.body);
+  return { article: articleOf(doc, doc.body, candidates), candidates: candidates.length };
 }
 
 /** Bottom-up, one pass: each candidate's text length is added to every ancestor between it and `body`
@@ -109,11 +113,14 @@ function contextOf(doc: Document, container: Element, lead: string): DocContext 
  * a message rather than an empty reader — never a partial read. A document with no `body` (an XML
  * document, or a bare `new Document()`) is treated the same as one with no candidates. */
 export function extractArticle(doc: Document): Article | undefined {
-  if (!doc.body) return undefined;
-  const candidates = candidatesWithText(doc.body);
+  return readArticle(doc).article;
+}
+
+/** §5.2 onwards, over candidates somebody else has already walked for. */
+function articleOf(doc: Document, body: Element, candidates: Array<[Element, string]>): Article | undefined {
   if (candidates.length === 0) return undefined;
 
-  const container = containerOf(doc.body, candidates);
+  const container = containerOf(body, candidates);
   const inside = candidates.filter(([el]) => container.contains(el)).slice(0, MAX_PASSAGES);
   if (inside.length < MIN_ARTICLE_PASSAGES) return undefined;
   if (inside.reduce((sum, [, text]) => sum + text.length, 0) < MIN_ARTICLE_CHARS) return undefined;

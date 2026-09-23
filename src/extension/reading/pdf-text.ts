@@ -183,7 +183,11 @@ function readingOrder(lines: Line[]): Line[] {
   return out;
 }
 
-const isHeadingLine = (line: Line, body: number): boolean => line.size >= HEADING_FACTOR * body && line.text.length <= HEADING_MAX_CHARS;
+/** §6.1.6 and §6.1.7's one rule, asked twice: of a LINE, to decide whether it starts a new block, and
+ * of the finished BLOCK, to decide whether that block is a heading. Written out at both sites, the two
+ * copies had already drifted apart textually; a block whose kind disagreed with the split that made it
+ * is the bug this shape rules out. */
+const isHeading = (size: number, length: number, body: number): boolean => size >= HEADING_FACTOR * body && length <= HEADING_MAX_CHARS;
 
 /** §6.1.6's join rule: a trailing hyphen before a lowercase continuation is a word broken across
  * lines; a hyphen before anything else (a compound, a capitalised name) is part of the word. */
@@ -203,7 +207,7 @@ function draftsOfPage(ordered: Line[], body: number): Draft[] {
     if (text === '') return;
     // §6.1.7: a big short block is a heading, anything else long enough is a passage, the rest is
     // dropped — a stray line of page furniture never becomes something to judge.
-    if (size >= HEADING_FACTOR * body && text.length <= HEADING_MAX_CHARS) out.push({ kind: 'heading', text, page, size });
+    if (isHeading(size, text.length, body)) out.push({ kind: 'heading', text, page, size });
     else if (text.length >= MIN_PASSAGE_CHARS) out.push({ kind: 'passage', text, page, size });
     text = '';
   };
@@ -214,7 +218,7 @@ function draftsOfPage(ordered: Line[], body: number): Draft[] {
       prev.column !== line.column ||
       prev.y - line.y > GAP_FACTOR * prev.size ||
       Math.abs(line.size - prev.size) > SIZE_STEP ||
-      isHeadingLine(line, body);
+      isHeading(line.size, line.text.length, body);
     if (starts) {
       flush();
       text = line.text;
@@ -247,13 +251,19 @@ export function pagesToBlocks(pages: PageText[], fallbackTitle: string): PdfDoc 
     titleSize = draft.size;
   }
 
-  // Headings cost nothing against the cap: they are navigation for the reader, never judged.
+  // Two caps of MAX_PASSAGES, counted separately: headings are never judged, so they cost nothing
+  // against the passage budget, but they are still DOM the reader page has to build — a 300-slide deck
+  // is thousands of short big-text blocks and every one of them would become an <h2>.
   const blocks: Block[] = [];
   let passages = 0;
+  let headings = 0;
   for (const draft of drafts) {
     if (draft.kind === 'passage') {
       if (passages >= MAX_PASSAGES) continue;
       passages += 1;
+    } else {
+      if (headings >= MAX_PASSAGES) continue;
+      headings += 1;
     }
     blocks.push({ kind: draft.kind, text: draft.text, page: draft.page });
   }

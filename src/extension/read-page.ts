@@ -8,7 +8,7 @@
 // that global SYNCHRONOUSLY and nothing at the top level awaits. Judging continues afterwards.
 
 import { send } from './messages';
-import { articleCandidates, extractArticle } from './reading/article';
+import { readArticle } from './reading/article';
 import { mountReader } from './reading/reader-ui';
 import { runReading } from './reading/run';
 
@@ -34,11 +34,14 @@ function run(): ReadResult {
     return { state: 'stopped' };
   }
 
-  const article = extractArticle(document);
+  // One walk of the page for both answers: asking for the article and then for the candidate count
+  // collapsed the text of every paragraph twice, which on a long page is ~105 ms of the user's own
+  // main thread spent twice over to say "this is not an article".
+  const { article, candidates } = readArticle(document);
   if (!article) {
     // Nothing is mounted: the popup says how many paragraphs were even considered, which is the
     // difference between "not an article" and "this page has no text yet".
-    return { state: 'no-article', passages: articleCandidates(document).length };
+    return { state: 'no-article', passages: candidates };
   }
 
   const handle = mountReader(document, {

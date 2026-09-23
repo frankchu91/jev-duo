@@ -23,7 +23,7 @@ import { ExampleStore } from '../core/learner';
 import { resolveProviders } from '../core/providers/resolve';
 import type { JevProvider, LlmProvider } from '../core/providers/types';
 import { ReadingJudge } from '../core/reading-judge';
-import type { DocContext, Passage } from '../core/reading';
+import { MAX_PASSAGES, type DocContext, type Passage } from '../core/reading';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
 import type { PagePlatform, PageSeenReport, Request, Response, Sender, Settings } from './messages';
 import { isValidOrigin, reconcileSites, registerSite, unregisterSite } from './sites';
@@ -277,7 +277,10 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       readingJudge = new ReadingJudge(resolveForSettings(settings, deps.fetchImpl).jev);
       readingJudgeStale = false;
     }
-    const { verdicts, usageTokens, errors } = await readingJudge.judge(ctx, focus, passages);
+    // §3's cap enforced here too, not only where the passages are extracted: this handler answers any
+    // sender (it carries no secrets and is not gated by enabledSites), so the ceiling on what one
+    // message can cost belongs on this side of the port as well.
+    const { verdicts, usageTokens, errors } = await readingJudge.judge(ctx, focus, passages.slice(0, MAX_PASSAGES));
     return { ok: true, type: 'readPassages', focus, verdicts, usageTokens, errors };
   }
 

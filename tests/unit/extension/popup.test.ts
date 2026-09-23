@@ -1009,6 +1009,25 @@ describe('initPopup', () => {
       doc.dispatchEvent(new Event('unload'));
     });
 
+    // Final wave: the one read-page path with no executeScript call at all. A tab Chrome answers with
+    // no `id` (it happens for a tab still being created, and for a devtools/PDF viewer target) is
+    // unaddressable, so the popup says so instead of injecting into the wrong tab or silently nothing.
+    it('says so, and injects nothing, when the active tab has no id', async () => {
+      withTabs([{ url: 'https://example.test/post' }]); // a URL but no id
+      const spy = spyOnExecuteScript({ state: 'started', passages: 21 });
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      el<HTMLButtonElement>(doc, 'read-page').click();
+      await flush();
+
+      expect(el(doc, 'read-status').textContent).toBe("can't read this tab: no tab id");
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
     it('reports a refused injection, and offers the PDF reader when the tab looks like a PDF', async () => {
       withTabs([{ id: 7, url: 'https://example.test/download', title: 'paper.pdf' }]);
       const { scripting } = (globalThis as unknown as { chrome: { scripting: { executeScript(o: unknown): Promise<unknown> } } }).chrome;
