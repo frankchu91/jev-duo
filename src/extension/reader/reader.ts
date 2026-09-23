@@ -20,7 +20,7 @@ import { openPdf, type OpenedPdf, type PdfAssets, type PdfjsLike } from '../read
 import { pagesToBlocks, type PdfDoc } from '../reading/pdf-text';
 import { mountReader, type ReaderHandle } from '../reading/reader-ui';
 import { runReading } from '../reading/run';
-import { mountPageRenderer, render, type PageRenderer } from './pages';
+import { mountPageRenderer, render, type PageRenderer, type RenderedDoc } from './pages';
 
 // pdf.js's own types are far more specific than loadPages needs; one cast at the boundary keeps a
 // pdfjs-dist patch release from being able to break `pnpm typecheck`.
@@ -109,7 +109,8 @@ function wireUp(): void {
   let sourceName = src ?? '';
   let handle: ReaderHandle | undefined;
   // The document stays OPEN for as long as it is on screen: its canvases are drawn from it on demand,
-  // and Read re-judges it with a new focus without re-fetching, re-parsing or re-rendering (§5.3).
+  // and Read re-judges it with a new focus without re-fetching, re-parsing or re-rendering (§5.3) —
+  // including a document no text came out of, whose pages are still worth looking at and scrolling.
   let opened: OpenedPdf | undefined;
   let renderer: PageRenderer | undefined;
   let passages: ArticlePassage[] = [];
@@ -202,17 +203,19 @@ function wireUp(): void {
     await previous?.destroy();
   }
 
-  /** bytes -> an open document, rendered in place. Returns false, with the status already set, when
-   * there is nothing to read. A document with no passages is not retained: its pdf.js document is
-   * destroyed and `opened` is left undefined, so a later Read press goes through this function again
-   * instead of finding `opened` truthy and reaching for a `passages[0]` that does not exist. */
+  /** bytes -> an open document, rendered in place and left open. Returns false, with the status already
+   * set, when the document could not be opened or built at all — the only case where nothing is
+   * retained, so a later Read press comes back through here rather than finding `opened` truthy.
+   *
+   * A document whose pages yielded NO text is still a document (§5.3): its pages are rendered and
+   * scrollable, exactly as for a document with text, and it is `read` — not this function — that says
+   * there is nothing to judge. Anything else would leave the blank page frames `render` has already
+   * built sitting under an error with no renderer to fill them. */
   async function openDocument(data: ArrayBuffer): Promise<boolean> {
     let pdf: OpenedPdf;
-    let doc: PdfDoc;
     try {
       // A COPY: pdf.js transfers the typed array it is given to its worker, which detaches the buffer.
       pdf = await openPdf(data.slice(0), pdfjs, pdfAssets());
-      doc = pagesToBlocks(pdf.pages, pdf.metaTitle ?? fileNameOf(sourceName));
     } catch (err) {
       // A corrupt file, a PDF pdf.js refuses without a password, or an HTML interstitial served at a
       // `.pdf` URL all reject here rather than resolving — caught so the status recovers instead of
@@ -220,19 +223,31 @@ function wireUp(): void {
       setStatus(parseErrorStatus(err), true);
       return false;
     }
-    const built = render(doc, pdf.pages, docEl);
-    if (built.passages.length === 0) {
-      await pdf.destroy();
-      setStatus(NO_TEXT_STATUS, true);
+    let doc: PdfDoc;
+    let built: RenderedDoc;
+    let mounted: PageRenderer;
+    try {
+      doc = pagesToBlocks(pdf.pages, pdf.metaTitle ?? fileNameOf(sourceName));
+      built = render(doc, pdf.pages, docEl);
+      mounted = mountPageRenderer({
+        sections: built.sections,
+        renderPage: (n, canvas, cssWidth, pixelRatio) => pdf.renderPage(n, canvas, cssWidth, pixelRatio),
+      });
+    } catch (err) {
+      // The document opened, then the extraction or the build threw. Nothing else holds it — `opened` is
+      // still undefined, so `closeDocument` could never find it — so it is destroyed here or its worker
+      // and its buffers leak for the life of the tab. A failure to destroy must not replace the real
+      // reason with its own, hence the swallowed rejection.
+      await pdf.destroy().catch(() => {});
+      docEl.textContent = ''; // no half-built document left under the error
+      setStatus(parseErrorStatus(err), true);
       return false;
     }
+    // Assigned only once every fallible step is behind us, so these four always describe one document.
     opened = pdf;
+    renderer = mounted;
     passages = built.passages;
     title = doc.title;
-    renderer = mountPageRenderer({
-      sections: built.sections,
-      renderPage: (n, canvas, cssWidth, pixelRatio) => pdf.renderPage(n, canvas, cssWidth, pixelRatio),
-    });
     return true;
   }
 
@@ -247,6 +262,13 @@ function wireUp(): void {
       if (!data) return;
       setStatus('reading…');
       if (!(await openDocument(data))) return;
+    }
+    // A text-free (scanned) document: rendered, scrollable, and nothing to judge — no panel, no calls,
+    // and no reach for a `passages[0]` that does not exist. Pressing Read again lands here again,
+    // against the same still-open document (§5.3).
+    if (passages.length === 0) {
+      setStatus(NO_TEXT_STATUS, true);
+      return;
     }
     const ctx: DocContext = { title: title.slice(0, TITLE_MAX), lead: passages[0].text.slice(0, LEAD_MAX), source: sourceName };
     handle = mountReader(document, {

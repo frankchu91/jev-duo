@@ -24,6 +24,18 @@ vi.mock('../../../src/extension/reading/pdf-load', async (importOriginal) => {
   return { ...actual, openPdf: (...args: unknown[]) => openPdfMock(...args) };
 });
 
+/** Set by the one test that needs the step AFTER `openPdf` to fail. Everything else in pdf-text stays
+ * real — the fixtures below depend on the actual block extraction — and so does `pagesToBlocks` itself
+ * whenever this is undefined. */
+let parseOverride: (() => never) | undefined;
+vi.mock('../../../src/extension/reading/pdf-text', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/extension/reading/pdf-text')>();
+  return {
+    ...actual,
+    pagesToBlocks: (...args: Parameters<typeof actual.pagesToBlocks>) => (parseOverride ? parseOverride() : actual.pagesToBlocks(...args)),
+  };
+});
+
 const NO_TEXT_STATUS = 'no text found in this PDF (scanned pages need OCR, which jev-duo does not do)';
 
 /** A one-page OpenedPdf whose page has no text items at all — the scanned-PDF case: `pagesToBlocks`
@@ -100,40 +112,121 @@ function pickFile(name: string, bytes = '%PDF-1.4 fake'): void {
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 const status = (): string => el('status').textContent ?? '';
 const docChildren = (): number => el('doc').children.length;
+const pageSections = (): HTMLElement[] => [...el('doc').querySelectorAll<HTMLElement>('section.jd-page')];
+
+/** jsdom has no IntersectionObserver at all, so pages.ts's default lazy-canvas observer is a no-op
+ * there — which is also the only handle a test has on whether the page renderer was mounted. This
+ * stand-in records what was observed and lets `show()` report all of it as visible, which is what makes
+ * the canvases draw. Its sections need a width too: `draw` skips a section it measures at 0 px, and
+ * jsdom measures everything at 0. */
+function installIntersectionObserver(): { show(): void } {
+  type Entry = { target: Element; isIntersecting: boolean };
+  const observed: Element[] = [];
+  let fire: ((entries: Entry[]) => void) | undefined;
+  class FakeIntersectionObserver {
+    constructor(callback: (entries: Entry[]) => void) {
+      fire = callback;
+    }
+    observe(target: Element): void {
+      observed.push(target);
+    }
+    unobserve(): void {}
+    disconnect(): void {
+      fire = undefined;
+    }
+  }
+  (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = FakeIntersectionObserver;
+  return {
+    show: () => {
+      for (const target of observed) Object.defineProperty(target, 'clientWidth', { value: 800, configurable: true });
+      fire?.(observed.map((target) => ({ target, isIntersecting: true })));
+    },
+  };
+}
 
 describe('reader.ts wireUp (chrome-stubbed)', () => {
   beforeEach(() => {
     installChromeStub();
     mountReaderDom();
     openPdfMock.mockReset();
+    parseOverride = undefined;
   });
 
   afterEach(() => {
     delete (globalThis as { chrome?: unknown }).chrome;
+    delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+    document.getElementById('jd-reader')?.remove();
   });
 
-  // --- Review fix round 1, IMPORTANT 1 ---
+  // --- Review fix round 2, IMPORTANT A: a text-free PDF is a document, not an error page ---
 
-  it('re-pressing Read on a text-free document shows NO_TEXT_STATUS again, never throws, and destroys each opened document once', async () => {
-    const first = emptyOpenedPdf();
-    const second = emptyOpenedPdf();
-    openPdfMock.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+  it('keeps a text-free document open and renders its pages, and says so again on the next Read', async () => {
+    const scan = emptyOpenedPdf();
+    openPdfMock.mockResolvedValueOnce(scan);
+    const io = installIntersectionObserver();
     await loadReader();
 
     pickFile('scan.pdf');
     await flush();
+
     expect(status()).toBe(NO_TEXT_STATUS);
     expect(el<HTMLElement>('status').classList.contains('error')).toBe(true);
-    expect(first.destroy).toHaveBeenCalledTimes(1);
+    // The page is really on screen, at its own proportions — not an empty frame under an error.
+    expect(pageSections().map((s) => s.style.aspectRatio)).toEqual(['612 / 792']);
+    expect(document.getElementById('jd-reader')).toBeNull(); // nothing to judge, so no panel
 
-    // The second press: `opened` was never retained, so this goes through openDocument again — the
-    // bug reached for `passages[0].text` here instead, throwing.
+    // The page renderer is mounted exactly as for a document with text: the scanned page draws when it
+    // nears the viewport, so it can be looked at and scrolled.
+    io.show();
+    await flush();
+    expect(scan.renderPage).toHaveBeenCalledTimes(1);
+    expect(scan.renderPage).toHaveBeenCalledWith(1, expect.any(HTMLCanvasElement), 800, expect.any(Number));
+
+    // Read again: the same open document, the same answer. No re-fetch, no re-open, no `passages[0]`.
     el<HTMLButtonElement>('read').click();
     await flush();
 
     expect(status()).toBe(NO_TEXT_STATUS); // not a thrown-TypeError status, and not stuck on "reading…"
-    expect(openPdfMock).toHaveBeenCalledTimes(2);
-    expect(second.destroy).toHaveBeenCalledTimes(1);
+    expect(openPdfMock).toHaveBeenCalledTimes(1);
+    expect(scan.destroy).not.toHaveBeenCalled();
+    expect(document.getElementById('jd-reader')).toBeNull();
+  });
+
+  it('destroys a text-free document when the next document arrives, like any other', async () => {
+    const scan = emptyOpenedPdf();
+    const paper = oneTextOpenedPdf();
+    openPdfMock.mockResolvedValueOnce(scan).mockResolvedValueOnce(paper);
+    await loadReader();
+
+    pickFile('scan.pdf');
+    await flush();
+    expect(scan.destroy).not.toHaveBeenCalled();
+
+    pickFile('paper.pdf');
+    await flush();
+
+    expect(scan.destroy).toHaveBeenCalledTimes(1);
+    expect(status()).toBe(''); // the panel owns the status line once there is something to read
+    expect(pageSections()).toHaveLength(1); // the new document's page, not the scan's
+  });
+
+  // --- Review fix round 2, minor B: a throw after openPdf must not leak the open document ---
+
+  it('destroys the opened document when the step after openPdf throws', async () => {
+    const pdf = oneTextOpenedPdf();
+    openPdfMock.mockResolvedValueOnce(pdf);
+    parseOverride = () => {
+      throw new Error('block extraction blew up');
+    };
+    await loadReader();
+
+    pickFile('a.pdf');
+    await flush();
+
+    expect(status()).toBe("can't read this PDF: block extraction blew up");
+    // Nothing else holds it: `opened` was never assigned, so closeDocument could never find it.
+    expect(pdf.destroy).toHaveBeenCalledTimes(1);
+    expect(docChildren()).toBe(0); // no half-built document under the error
   });
 
   // --- Review fix round 1, minor 5 ---
