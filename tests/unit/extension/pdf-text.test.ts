@@ -112,6 +112,23 @@ describe('pagesToBlocks running headers and page numbers', () => {
     expect(doc.blocks.filter((b) => b.kind === 'passage')).toHaveLength(2);
   });
 
+  // Final wave: the 3 pt tolerance is a WINDOW around each line's y, not a rounded bucket — 770 and
+  // 768 are 2 pt apart and must match even though `Math.round(y / 3)` puts them in different buckets.
+  // The text is deliberately over 40 characters so an undropped copy shows up as a passage.
+  const DRIFTING = 'Confidential draft of a running header line';
+
+  it('drops a header that drifts within the 3pt tolerance across pages', () => {
+    const ys = [770, 768, 769];
+    const pages = [1, 2, 3].map((n) => page(n, [item(DRIFTING, 72, ys[n - 1]), ...bodyOf(n)]));
+    expect(pagesToBlocks(pages, 'fallback').blocks.map((b) => b.text)).not.toContain(DRIFTING);
+  });
+
+  it('keeps a repeated line whose y drifts further than the tolerance', () => {
+    const ys = [770, 766, 762];
+    const pages = [1, 2, 3].map((n) => page(n, [item(DRIFTING, 72, ys[n - 1]), ...bodyOf(n)]));
+    expect(pagesToBlocks(pages, 'fallback').blocks.filter((b) => b.text === DRIFTING)).toHaveLength(3);
+  });
+
   it('drops roman numerals as page numbers too', () => {
     const pages = [1, 2].map((n) => page(n, [...bodyOf(n), item(n === 1 ? 'iv' : 'v', 300, 40)]));
     expect(pagesToBlocks(pages, 'fallback').blocks.map((b) => b.text).join('\n')).not.toContain('iv');
@@ -140,6 +157,33 @@ describe('pagesToBlocks columns', () => {
     expect(passages[1].startsWith('RIGHT.')).toBe(true);
     expect(passages[2].startsWith('CAPTION.')).toBe(true);
     expect(doc.title).toBe('A Two Column Paper');
+  });
+});
+
+// Final wave, IMPORTANT: `runningFilter` used to re-scan its whole equal-normalized-text group once
+// per line in it (`for (const anchor of group) group.filter(...)`), which is O(n²) in the size of the
+// largest group. A table whose rows all normalize to the same shape (digits -> '#') puts the entire
+// document in one group: 12,000 lines took 381 ms on the reader page's main thread.
+describe('pagesToBlocks performance', () => {
+  it('filters 12,000 same-shape lines across 120 pages in under 100ms', () => {
+    // Fixed-width numbers on purpose: normalize() maps each digit to '#', so every one of these 12,000
+    // rows collapses onto ONE key and the filter faces its worst case.
+    const pages = Array.from({ length: 120 }, (_, p) =>
+      page(
+        p + 1,
+        Array.from({ length: 100 }, (_, i) => item(`Row ${String(i).padStart(3, '0')} 45.6 78 900 1234 5678 9012`, 72, 700 - i * 6)),
+      ),
+    );
+
+    const start = performance.now();
+    const doc = pagesToBlocks(pages, 'fallback');
+    const elapsed = performance.now() - start;
+
+    // Every row sits at the same y on all 120 pages, so the rule drops all of them — the same answer
+    // the quadratic version gave, which is what makes this an equivalence check and not just a clock.
+    expect(doc.blocks).toHaveLength(0);
+    expect(doc.title).toBe('fallback');
+    expect(elapsed).toBeLessThan(100);
   });
 });
 
