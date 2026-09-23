@@ -15,6 +15,9 @@ import { decideReading, readingQuestions, readingState, type DocContext, type Pa
 export const READING_CONCURRENCY = 6;
 export const READING_TIMEOUT_MS = 10_000;
 export const READING_CACHE_SIZE = 2000;
+/** §3.1. The panel prints this under the summary line, so it has to fit on one: a provider that
+ * answers a failure with a whole HTML page would otherwise push the panel off the screen. */
+const LAST_ERROR_MAX = 200;
 
 export interface ReadingJudgeOptions {
   concurrency?: number;
@@ -27,6 +30,8 @@ export interface ReadingRun {
   usageTokens: number;
   errors: number;
   ms: number;
+  /** The message of the most recent call that failed (§3.1); absent when none did. */
+  lastError?: string;
 }
 
 export class ReadingJudge {
@@ -55,6 +60,7 @@ export class ReadingJudge {
     const acquire = semaphore(this.concurrency);
     let usageTokens = 0;
     let errors = 0;
+    let lastError: string | undefined;
 
     // One call per DISTINCT id (§3: `rd:` + fnv1a of the first 300 characters), not per passage. A
     // document that repeats a paragraph verbatim — a legal note, a quoted block, a boilerplate footer —
@@ -99,12 +105,15 @@ export class ReadingJudge {
           usageTokens += res.usage?.inputTokens ?? 0;
           if (key !== undefined) this.cache.set(key, verdict);
           fanOut(at, verdict);
-        } catch {
+        } catch (err) {
           // Fail open (§2): the passage is shown exactly as the document rendered it. Never cached —
           // a transient failure must not pin a passage to "plain" for the rest of the session. Counted
           // once per passage, not once per call: `errors` is what the panel's "N errors" line sits
           // next to "M passages", and every one of these passages did go unjudged.
           errors += at.length;
+          // §3.1: the LAST failure wins. Ten passages failing the same way all carry the same message,
+          // and when they do not, the most recent one is the one the reader can still act on.
+          lastError = (err instanceof Error ? err.message : String(err)).slice(0, LAST_ERROR_MAX);
           fanOut(at, { id: passage.id, verdict: 'plain', p: 0.5, core: 0.5, error: true });
         } finally {
           release();
@@ -112,7 +121,7 @@ export class ReadingJudge {
       }),
     );
 
-    return { verdicts, usageTokens, errors, ms: Date.now() - started };
+    return { verdicts, usageTokens, errors, lastError, ms: Date.now() - started };
   }
 
   /** Best-effort cache key: no Web Crypto (an insecure context) degrades to "always a miss" rather

@@ -1038,6 +1038,27 @@ describe('background', () => {
       expect(res.verdicts.at(-1)?.id).toBe(`rd:${MAX_PASSAGES - 1}`);
     });
 
+    // §3.1: the reason has to survive the port. A 401 is not retryable, so this resolves immediately
+    // rather than spending the http layer's two backoff sleeps.
+    it("copies the judge's lastError into the reply", async () => {
+      await chrome.storage.local.set({ settings: { providerMode: 'typesafe', keys: { typesafe: 'ts-key' } } });
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { message: 'invalid api key' } }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      const bg = createBackground({ fetchImpl });
+      await bg.ready;
+
+      const res = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'some text')] });
+
+      if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(res.errors).toBe(1);
+      expect(res.lastError).toBe('invalid api key');
+      expect(res.verdicts[0]).toMatchObject({ verdict: 'plain', error: true });
+    });
+
     it('throws the judge away when a key changes, so nothing is served from the old provider', async () => {
       const bg = createBackground();
       await bg.ready;

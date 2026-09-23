@@ -103,6 +103,8 @@ export type Response =
       hasKeys: boolean;
       providers: { jev: string; llm: string };
       pageSeen: PageSeenReport[];
+      /** The service worker's own `BUILD_ID` (§3.3): the popup compares it with its own. */
+      build: string;
     }
   | { ok: true; type: 'isSiteEnabled'; enabled: boolean }
   | { ok: true; type: 'pageSeen' }
@@ -112,7 +114,8 @@ export type Response =
   | { ok: true; type: 'enableSite' | 'disableSite'; genericSites: string[] }
   // `focus` is the setting the background actually applied, echoed so the reader panel can show the
   // question the verdicts answer without reading Settings itself (a content script may not).
-  | { ok: true; type: 'readPassages'; focus: string; verdicts: ReadingVerdict[]; usageTokens: number; errors: number }
+  // `lastError` is the judge's most recent failed call (§3.1), so "65 errors" can say why.
+  | { ok: true; type: 'readPassages'; focus: string; verdicts: ReadingVerdict[]; usageTokens: number; errors: number; lastError?: string }
   | { ok: false; error: string };
 
 /** Wraps `chrome.runtime.sendMessage` in a Promise: resolves `{ok:false,error}` (never rejects) when

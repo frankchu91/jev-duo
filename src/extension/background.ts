@@ -25,6 +25,7 @@ import type { JevProvider, LlmProvider } from '../core/providers/types';
 import { ReadingJudge } from '../core/reading-judge';
 import { MAX_PASSAGES, type DocContext, type Passage } from '../core/reading';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
+import { BUILD_ID } from './build-id';
 import type { PagePlatform, PageSeenReport, Request, Response, Sender, Settings } from './messages';
 import { isValidOrigin, reconcileSites, registerSite, unregisterSite } from './sites';
 import { loadExamples, loadPageSeen, loadSettings, loadStats, loadVerdicts, MAX_PAGE_REPORTS, MAX_VERDICTS, saveExamples, savePageSeen, saveSettings, saveStats, saveVerdicts } from './storage';
@@ -280,8 +281,8 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     // §3's cap enforced here too, not only where the passages are extracted: this handler answers any
     // sender (it carries no secrets and is not gated by enabledSites), so the ceiling on what one
     // message can cost belongs on this side of the port as well.
-    const { verdicts, usageTokens, errors } = await readingJudge.judge(ctx, focus, passages.slice(0, MAX_PASSAGES));
-    return { ok: true, type: 'readPassages', focus, verdicts, usageTokens, errors };
+    const { verdicts, usageTokens, errors, lastError } = await readingJudge.judge(ctx, focus, passages.slice(0, MAX_PASSAGES));
+    return { ok: true, type: 'readPassages', focus, verdicts, usageTokens, errors, lastError };
   }
 
   async function handleCompile(intent: string): Promise<Response> {
@@ -407,7 +408,7 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       case 'feedback':
         return enqueueMutation(() => handleFeedback(req.example));
       case 'getState':
-        return { ok: true, type: 'getState', settings, stats: agent.stats(), exampleCount: agent.examples.size, hasKeys, providers, pageSeen: pageSeenReports() };
+        return { ok: true, type: 'getState', settings, stats: agent.stats(), exampleCount: agent.examples.size, hasKeys, providers, pageSeen: pageSeenReports(), build: BUILD_ID };
       case 'isSiteEnabled': {
         const { platform } = req;
         // A generic origin is opt-in and off by default (fail-closed): enabled only once the user's

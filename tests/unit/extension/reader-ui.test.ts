@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DocContext, Passage, ReadingVerdict } from '../../../src/core/reading';
 import type { ArticlePassage } from '../../../src/extension/reading/article';
-import { mountReader, READER_CSS } from '../../../src/extension/reading/reader-ui';
+import { lastErrorLine, mountReader, READER_CSS, STALE_BACKGROUND_HINT } from '../../../src/extension/reading/reader-ui';
 import { runReading } from '../../../src/extension/reading/run';
 import type { Request, Response, send } from '../../../src/extension/messages';
 
@@ -157,6 +157,59 @@ describe('mountReader panel', () => {
     vi.advanceTimersByTime(1200);
     expect(passages[0].el.classList.contains('jd-flash')).toBe(false);
     vi.useRealTimers();
+  });
+});
+
+describe('the panel says why it failed (§3.2)', () => {
+  const errorLineOf = (doc: Document): string | null => panelOf(doc).querySelector('p.error')?.textContent ?? null;
+
+  it('prints the last error under the summary', () => {
+    const { doc, passages } = docWith(2);
+    mountReader(doc, { passages, focus: '', onClose: () => {} }).finish({
+      ms: 1000,
+      usageTokens: 0,
+      errors: 2,
+      lastError: 'invalid api key',
+    });
+
+    expect(panelOf(doc).querySelector('.progress')?.textContent).toBe('2 passages · 1.0 s · ~$0.0000 · 2 errors');
+    expect(errorLineOf(doc)).toBe('last error: invalid api key');
+  });
+
+  it('turns a stale service worker into the reload hint instead', () => {
+    const { doc, passages } = docWith(2);
+    mountReader(doc, { passages, focus: '', onClose: () => {} }).finish({
+      ms: 1000,
+      usageTokens: 0,
+      errors: 2,
+      lastError: 'unknown request type: readPassages',
+    });
+
+    expect(errorLineOf(doc)).toBe(STALE_BACKGROUND_HINT);
+    expect(STALE_BACKGROUND_HINT).toBe('the extension was updated — reload it at chrome://extensions (↻) and read again');
+  });
+
+  it('admits when the errors carried no message at all', () => {
+    const { doc, passages } = docWith(2);
+    mountReader(doc, { passages, focus: '', onClose: () => {} }).finish({ ms: 1000, usageTokens: 0, errors: 2 });
+
+    expect(errorLineOf(doc)).toBe('errors without a message');
+  });
+
+  it('adds no second line when nothing failed', () => {
+    const { doc, passages } = docWith(2);
+    mountReader(doc, { passages, focus: '', onClose: () => {} }).finish({ ms: 1000, usageTokens: 0, errors: 0 });
+
+    expect(errorLineOf(doc)).toBe('');
+  });
+
+  it('lastErrorLine is the whole decision, and is pure', () => {
+    expect(lastErrorLine(undefined)).toBe('errors without a message');
+    expect(lastErrorLine('HTTP 502')).toBe('last error: HTTP 502');
+    expect(lastErrorLine('unknown request type: readPassages')).toBe(STALE_BACKGROUND_HINT);
+    expect(lastErrorLine('unknown request type')).toBe(STALE_BACKGROUND_HINT);
+    // Not a prefix match: a message that merely mentions it is still printed verbatim.
+    expect(lastErrorLine('the background replied unknown request type')).toBe('last error: the background replied unknown request type');
   });
 });
 
@@ -475,5 +528,57 @@ describe('runReading', () => {
     expect(fn).toHaveBeenCalledTimes(2); // the third batch (passages 24..29) was never sent
     expect(applySpy).toHaveBeenCalledTimes(12); // only the first (undestroyed) batch's verdicts were applied
     expect(doc.querySelectorAll('.jd-hl, .jd-dim, .jd-rtag')).toHaveLength(0); // destroy() restored the page
+  });
+
+  // --- Design addendum 2026-09-23 §3.1: the summary carries the reason, not just the count ---
+
+  it("carries a failed batch's error into the summary", async () => {
+    const { doc, passages } = docWith(5);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    const send = sendSpy(() => ({ ok: false, error: 'unknown request type: readPassages' })).send;
+
+    const summary = await runReading({ handle, ctx, passages, send });
+
+    expect(summary.errors).toBe(5);
+    expect(summary.lastError).toBe('unknown request type: readPassages');
+  });
+
+  it('keeps the FIRST error in batch order, not the last', async () => {
+    const { doc, passages } = docWith(4);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    let n = 0;
+    const send = sendSpy(() => {
+      n += 1;
+      return { ok: false, error: `batch ${n} failed` };
+    }).send;
+
+    const summary = await runReading({ handle, ctx, passages, send, batchSize: 2 });
+
+    expect(summary.lastError).toBe('batch 1 failed');
+  });
+
+  it("carries a reply's own lastError when no batch failed outright", async () => {
+    const { doc, passages } = docWith(3);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    const send = sendSpy((req) =>
+      req.type === 'readPassages'
+        ? { ok: true, type: 'readPassages', focus: '', verdicts: [], usageTokens: 0, errors: 1, lastError: 'invalid api key' }
+        : undefined,
+    ).send;
+
+    const summary = await runReading({ handle, ctx, passages, send });
+
+    expect(summary.errors).toBe(1);
+    expect(summary.lastError).toBe('invalid api key');
+  });
+
+  it('leaves lastError absent when nothing failed at all', async () => {
+    const { doc, passages } = docWith(3);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+
+    const summary = await runReading({ handle, ctx, passages, send: sendSpy().send });
+
+    expect(summary.errors).toBe(0);
+    expect(summary.lastError).toBeUndefined();
   });
 });

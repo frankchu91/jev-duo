@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DuoStats } from '../../../src/core/duo';
 import type { QuestionPack } from '../../../src/core/types';
 import type { PageSeenReport, Request, Response, Settings, send } from '../../../src/extension/messages';
-import { initPopup } from '../../../src/extension/popup/popup';
+import { BUILD_ID } from '../../../src/extension/build-id';
+import { initPopup, STALE_POPUP_STATUS } from '../../../src/extension/popup/popup';
 import { EXTENSION_ORIGIN, installChromeStub, type ChromeStub } from './chrome-stub';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -91,6 +92,8 @@ function getStateResponse(overrides: Partial<Settings> = {}, stats: DuoStats = S
     hasKeys: false,
     providers: { jev: 'mock', llm: 'mock' },
     pageSeen,
+    // Under vitest both sides of the handshake are 'dev', so the default response is never stale.
+    build: BUILD_ID,
   };
 }
 
@@ -1075,6 +1078,58 @@ describe('initPopup', () => {
       await flush();
 
       expect(spy).toHaveBeenCalledWith({ target: { tabId: 42 }, files: ['read-page.js'] });
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    // --- Design addendum 2026-09-23 §3.3: say it before anything is clicked, not after 65 errors ---
+
+    it('disables both read buttons and says so when the background is from another build', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/paper.pdf' }]);
+      const doc = loadDoc();
+      // Narrowed first: `getStateResponse` is typed as the whole `Response` union, and spreading that
+      // union before overriding `build` is not assignable back to it.
+      const state = getStateResponse();
+      if (!state.ok || state.type !== 'getState') throw new Error('test: expected a getState response');
+      const send = makeFakeSend((req) =>
+        req.type === 'getState' ? { ...state, build: '2026-09-23T07:00:00.000Z' } : { ok: true, type: 'setSettings' },
+      );
+
+      await initPopup(doc, { send: asSend(send) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').disabled).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').disabled).toBe(true);
+      expect(el(doc, 'read-status').textContent).toBe(STALE_POPUP_STATUS);
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
+      expect(STALE_POPUP_STATUS).toBe('reload the extension at chrome://extensions (↻) to finish updating');
+      // The rest of the popup keeps working: the settings still filled in.
+      expect(el<HTMLTextAreaElement>(doc, 'intent').value).toBe('Hide crypto shilling.');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('leaves both read buttons alone when the builds match', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/paper.pdf' }]);
+      const doc = loadDoc();
+
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').disabled).toBe(false);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').disabled).toBe(false);
+      expect(el(doc, 'read-status').textContent).toBe('');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('a getState that failed altogether changes nothing about the buttons', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/post' }]);
+      const doc = loadDoc();
+      const send = makeFakeSend(() => ({ ok: false, error: 'Could not establish connection.' }));
+
+      await initPopup(doc, { send: asSend(send) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').disabled).toBe(false);
+      expect(el(doc, 'read-status').textContent).toBe('');
+
       doc.dispatchEvent(new Event('unload'));
     });
   });

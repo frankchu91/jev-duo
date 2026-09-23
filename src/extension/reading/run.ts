@@ -20,7 +20,7 @@ export async function runReading(deps: {
   send: typeof send;
   batchSize?: number;
   now?: () => number;
-}): Promise<{ ms: number; usageTokens: number; errors: number }> {
+}): Promise<{ ms: number; usageTokens: number; errors: number; lastError?: string }> {
   const { handle, ctx, passages } = deps;
   const size = deps.batchSize ?? READ_BATCH;
   const now = deps.now ?? (() => Date.now());
@@ -28,6 +28,9 @@ export async function runReading(deps: {
   let judged = 0;
   let usageTokens = 0;
   let errors = 0;
+  // §3.1: the FIRST reason in batch order, not the last — the first batch to fail is the one that
+  // explains the run (a stale service worker answers every later batch identically anyway).
+  let lastError: string | undefined;
   let focusShown = false;
 
   handle.setProgress(0, passages.length);
@@ -52,16 +55,19 @@ export async function runReading(deps: {
       for (const verdict of res.verdicts) handle.apply(verdict);
       usageTokens += res.usageTokens;
       errors += res.errors;
+      if (lastError === undefined && res.lastError !== undefined) lastError = res.lastError;
     } else {
       // Fail open (§2): a batch the background could not answer leaves its passages exactly as the
       // document rendered them, counted so the summary line admits it.
       errors += batch.length;
+      // `!res.ok` is what narrows `res` to the error variant — the ok variant always has this type.
+      if (lastError === undefined && !res.ok) lastError = res.error;
     }
     judged += batch.length;
     handle.setProgress(judged, passages.length);
   }
 
-  const summary = { ms: now() - started, usageTokens, errors };
+  const summary = { ms: now() - started, usageTokens, errors, lastError };
   // A destroyed reader has nothing left to show a summary on; `finish` would no-op anyway, but the
   // panel is gone either way, so there's no reason to touch it.
   if (!handle.isDestroyed()) handle.finish(summary);

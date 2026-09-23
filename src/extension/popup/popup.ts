@@ -8,6 +8,7 @@
 
 import type { DuoStats } from '../../core/duo';
 import type { QuestionPack } from '../../core/types';
+import { BUILD_ID } from '../build-id';
 import { isBuiltInHost } from '../built-in-hosts';
 import { send, type PageSeenReport, type Response, type Settings } from '../messages';
 import type { ReadResult } from '../read-page';
@@ -26,6 +27,10 @@ const MODEL_PLACEHOLDER: Record<Settings['providerMode'], string> = {
 
 const NO_PAGE_REPORT = 'no page report yet';
 const ZERO_SEEN = "0 posts seen on this page — the site's layout may have changed";
+
+/** §3.3. Shown instead of a read the popup already knows will fail: the service worker still running
+ * is from an older build than this popup, so it has no `readPassages` handler at all. */
+export const STALE_POPUP_STATUS = 'reload the extension at chrome://extensions (↻) to finish updating';
 
 /** The active tab, used to pick this window's `pageSeen` report out of getState (by `id`) and to drive
  * the This-site and Read this page sections (by `url`/`title`, readable while the popup is open thanks
@@ -290,6 +295,17 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     setReadStatus('');
   }
 
+  /** §3.3's whole handshake. Only ever SETS — a reload is the only cure, so nothing clears it — and it
+   * touches nothing but the two read buttons and their status line, so the rest of the popup (settings,
+   * keys, sites, stats) stays usable while the user goes and reloads. A failed `getState` never calls
+   * this: nothing was learned, and the existing `loadFailed` path already says so. */
+  function applyBuild(build: string): void {
+    if (build === BUILD_ID) return;
+    readPageBtn.disabled = true;
+    readPdfBtn.disabled = true;
+    setReadStatus(STALE_POPUP_STATUS, true);
+  }
+
   /** Opens the extension's own reader page, optionally pointed at a PDF. Not web-accessible: only
    * the extension can navigate to it (§10). */
   function openReader(src?: string): void {
@@ -351,6 +367,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   async function refresh(): Promise<void> {
     const res = await send({ type: 'getState' });
     if (!res.ok || res.type !== 'getState') return;
+    applyBuild(res.build);
     if (loadFailed) {
       fillSettings(res.settings);
       setCompileStatus('', false); // clear the stale "couldn't reach the extension" message now that it's recovered
@@ -495,6 +512,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     fillStats(initial.stats, initial.exampleCount);
     fillPageSeen(initial.pageSeen, tabId);
     brainStatusEl.textContent = `fast brain: ${initial.providers.jev} · slow brain: ${initial.providers.llm}`;
+    applyBuild(initial.build);
   } else {
     // Controls are left exactly as popup.html renders them (nothing here disables anything) — still
     // usable, just not yet filled with real settings — and the next successful `refresh()` tick will

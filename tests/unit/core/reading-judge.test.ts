@@ -229,4 +229,36 @@ describe('ReadingJudge', () => {
     expect(run.verdicts[0].core).toBe(0.95);
     expect(run.usageTokens).toBe(0); // the mock reports no usage
   });
+
+  // --- Design addendum 2026-09-23 §3.1: an error that says nothing is a bug report nobody can file ---
+
+  it('reports the most recent failed call as lastError, capped at 200 characters', async () => {
+    const jev: JevProvider = {
+      name: 'failing',
+      async evaluate(): Promise<JevResponse> {
+        throw new Error(`upstream said no: ${'x'.repeat(300)}`);
+      },
+    };
+
+    const run = await new ReadingJudge(jev).judge(CTX, '', passages('a passage whose call fails'));
+
+    expect(run.errors).toBe(1);
+    expect(run.lastError).toHaveLength(200);
+    expect(run.lastError?.startsWith('upstream said no: xxx')).toBe(true);
+  });
+
+  it('reports a timeout by its own message', async () => {
+    const jev: JevProvider = { name: 'slow', evaluate: () => new Promise<JevResponse>(() => {}) };
+
+    const run = await new ReadingJudge(jev, { timeoutMs: 5 }).judge(CTX, '', passages('a passage nobody answers'));
+
+    expect(run.lastError).toBe('timeout after 5ms');
+  });
+
+  it('leaves lastError absent when every call succeeded', async () => {
+    const run = await new ReadingJudge(stubJev()).judge(CTX, '', passages('first passage', 'second passage'));
+
+    expect(run.errors).toBe(0);
+    expect(run.lastError).toBeUndefined();
+  });
 });

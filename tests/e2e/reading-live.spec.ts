@@ -10,6 +10,8 @@ import { expect, test } from '@playwright/test';
 import { createTypesafeJev } from '../../src/core/providers/jev/typesafe';
 import { KIND_OPTIONS, passageId, type DocContext, type Passage } from '../../src/core/reading';
 import { ReadingJudge, type ReadingRun } from '../../src/core/reading-judge';
+import { launchWithExtension, seedSettings } from './helpers';
+import { FIXTURE_ORIGIN } from './server';
 
 const LIVE = process.env.LIVE === '1';
 const JEV_KEY = process.env.TYPESAFE_API_KEY;
@@ -57,4 +59,37 @@ test('reading mode: the real Jev API ranks substance over acknowledgments', { ta
   expect(positional.focus ?? 0).toBeGreaterThan(acknowledged.focus ?? 1);
 
   console.log(`live reading: ${plain.usageTokens + focused.usageTokens} input tokens, ${plain.ms + focused.ms} ms`);
+});
+
+// §3.4. The core test above proves the fast brain separates substance from acknowledgments; this one
+// proves the whole extension does — popup click, injection, service worker, real provider — and that
+// it does it with ZERO errors, which is the regression the addendum exists for. It launches its own
+// browser inside the test body, after the guards, so a plain `pnpm test:e2e` never pays for a Chromium
+// launch it is about to skip.
+test('reading mode: the built extension reads the article fixture with no errors', { tag: '@live-jev' }, async () => {
+  test.skip(!LIVE, 'set LIVE=1 to run tests that need the public internet');
+  test.skip(!JEV_KEY, 'set TYPESAFE_API_KEY (repo .env is loaded by playwright.config.ts) to run the live reading test');
+  test.setTimeout(180_000);
+
+  const ext = await launchWithExtension();
+  try {
+    await seedSettings(ext, { providerMode: 'typesafe', keys: { typesafe: JEV_KEY ?? '' }, focus: '' });
+
+    const articleUrl = `${FIXTURE_ORIGIN}/article.html`;
+    const article = await ext.context.newPage();
+    await article.goto(articleUrl);
+
+    const popup = await ext.context.newPage();
+    await popup.goto(`chrome-extension://${ext.extensionId}/popup.html?jd-tab=${encodeURIComponent(articleUrl)}`);
+    await popup.locator('#read-page').click();
+    await expect(popup.locator('#read-status')).toHaveText('reading 21 passages');
+
+    const progress = article.locator('#jd-reader .progress');
+    await expect(progress).toHaveText(/^21 passages · /, { timeout: 120_000 });
+    await expect(progress).not.toHaveText(/errors/);
+    await expect(article.locator('#jd-reader p.error')).toHaveText('');
+    expect(await article.locator('.jd-hl').count()).toBeGreaterThanOrEqual(1);
+  } finally {
+    await ext.close();
+  }
 });

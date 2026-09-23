@@ -39,6 +39,11 @@ await build({
 await chmod(cliOut, 0o755);
 outputs.push(rel(cliOut));
 
+// One stamp per build, handed to every EXTENSION bundle and to none of the CLI's: the popup compares
+// its own against the service worker's and refuses to read when they differ, which is what turns
+// "65 errors" into "reload the extension" before anything is clicked (design addendum §3.3).
+const buildId = new Date().toISOString();
+
 // (b) Extension scripts. The service worker is declared `type: module` in the
 // manifest, so it may stay ESM; content script and popup must be IIFEs. These
 // are minified (the CLI is not: it stays readable for `node dist/cli/index.js`
@@ -68,6 +73,7 @@ for (const { entry, out, format, footer } of extEntries) {
     platform: 'browser',
     format,
     target: 'chrome120',
+    define: { __JD_BUILD__: JSON.stringify(buildId) },
     minify: true,
     ...(footer ? { footer } : {}),
     logLevel: 'warning',

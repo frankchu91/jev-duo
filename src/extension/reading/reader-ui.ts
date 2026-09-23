@@ -33,6 +33,8 @@ button { font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px; b
 .x { border: none; background: none; font-size: 14px; line-height: 1; padding: 0 2px; }
 .meta { color: #6b6b73; margin: 0; padding: 4px 10px; }
 .meta:empty { display: none; }
+.error { color: #b3261e; margin: 0; padding: 0 10px 4px; }
+.error:empty { display: none; }
 ol { flex: 1; overflow-y: auto; margin: 0; padding: 0 10px 6px 26px; }
 li { padding: 3px 0; cursor: pointer; }
 li:hover { text-decoration: underline; }
@@ -42,15 +44,29 @@ footer { display: flex; gap: 8px; padding: 6px 10px; border-top: 1px solid #dcdc
   header, footer { border-color: #3a3a41; }
   button { background: #26262b; color: #d6d6dc; border-color: #3a3a41; }
   .meta { color: #a4a4ac; }
+  .error { color: #ff6b6b; }
 }
 `;
+
+/** §3.2. What `background.ts`'s dispatch default answers is `unknown request type: <type>`, which is
+ * exactly what an unpacked install whose service worker predates the update says to every single
+ * `readPassages` — 65 instant failures and a count that explains nothing. This says what to do. */
+export const STALE_BACKGROUND_HINT = 'the extension was updated — reload it at chrome://extensions (↻) and read again';
+
+/** §3.2's whole decision, as one pure function: the reason when there is one, the hint when the reason
+ * is the stale-worker one, and an admission when the failures carried no message. */
+export function lastErrorLine(lastError: string | undefined): string {
+  if (lastError === undefined) return 'errors without a message';
+  if (lastError.startsWith('unknown request type')) return STALE_BACKGROUND_HINT;
+  return `last error: ${lastError}`;
+}
 
 export interface ReaderHandle {
   apply(v: ReadingVerdict): void;
   /** The background owns `Settings.focus`, so the panel learns it from the first reply (§9). */
   setFocus(focus: string): void;
   setProgress(judged: number, total: number): void;
-  finish(summary: { ms: number; usageTokens: number; errors: number }): void;
+  finish(summary: { ms: number; usageTokens: number; errors: number; lastError?: string }): void;
   /** Idempotent: a second call is a no-op (no double `onClose`, nothing removed twice). */
   destroy(): void;
   /** True once `destroy()` has run. `runReading` polls this to stop feeding a closed reader — see
@@ -122,6 +138,10 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
   focusLine.className = 'meta focus';
   const progressLine = host.createElement('p');
   progressLine.className = 'meta progress';
+  // §3.2's second line. Empty (and `display: none` by the sheet above) until `finish` has something
+  // to say — it is never shown while a read is still running, only under the final summary.
+  const errorLine = host.createElement('p');
+  errorLine.className = 'error';
   const list = host.createElement('ol');
 
   const foot = host.createElement('footer');
@@ -133,7 +153,7 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
   close.textContent = 'Close';
   foot.append(showAll, close);
 
-  wrap.append(head, focusLine, progressLine, list, foot);
+  wrap.append(head, focusLine, progressLine, errorLine, list, foot);
   shadow.append(panelStyle, wrap);
   host.body.appendChild(panel);
 
@@ -236,6 +256,7 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
       const usd = ((summary.usageTokens * JEV_INPUT_USD_PER_MTOK) / 1e6).toFixed(4);
       const errors = summary.errors > 0 ? ` · ${summary.errors} errors` : '';
       progressLine.textContent = `${opts.passages.length} passages · ${(summary.ms / 1000).toFixed(1)} s · ~$${usd}${errors}`;
+      errorLine.textContent = summary.errors > 0 ? lastErrorLine(summary.lastError) : '';
     },
     destroy,
     isDestroyed: () => destroyed,
