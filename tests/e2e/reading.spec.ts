@@ -2,6 +2,7 @@
 // popup exactly as a user would. Its own browser context (Playwright runs spec files one at a time
 // here), because extension.spec.ts switches the provider to a live key partway through its run.
 
+import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { fnv1a } from '../../src/core/hash';
@@ -172,4 +173,14 @@ test('an empty or non-http(s) src is rejected up front, with the picker still av
   await expect(page.locator('.jd-passage')).toHaveCount(8);
 
   await page.close();
+});
+
+// §5.3's assets, from the other side: tests/e2e/server.ts's globalSetup guarantees dist/ was built,
+// so this is the half of the build assertion that can honestly say "after `pnpm build`".
+test("the build ships pdf.js's fonts, cmaps and wasm decoders next to the reader", () => {
+  for (const folder of ['standard_fonts', 'cmaps', 'wasm']) {
+    const dir = path.join(ROOT, 'dist', 'extension', folder);
+    expect(existsSync(dir), `dist/extension/${folder} is missing — scripts/build.mjs did not copy it`).toBe(true);
+    expect(readdirSync(dir).length).toBeGreaterThan(0);
+  }
 });

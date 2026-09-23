@@ -108,6 +108,23 @@ const workerDest = path.join(extDist, 'pdf.worker.mjs');
 await cp(workerSrc, workerDest);
 outputs.push(rel(workerDest));
 
+// pdf.js keeps three things out of its bundle and fetches them at runtime: the standard 14 font
+// programs, the CJK cmaps, and the wasm decoders for JPX/JBIG2 images. They are copied to the
+// extension's own origin (about 4 MB together, so the zip grows by roughly that), where reader.ts
+// points getDocument at them with chrome.runtime.getURL — which the default extension CSP allows and
+// which needs no web_accessible_resources entry, exactly like the worker above. Same guard, too: a
+// missing folder is a one-line build failure rather than a PDF that renders blank at runtime.
+for (const folder of ['standard_fonts', 'cmaps', 'wasm']) {
+  const from = path.join(root, 'node_modules', 'pdfjs-dist', folder);
+  if (!existsSync(from)) {
+    console.error(`build: no ${folder} in node_modules/pdfjs-dist — run \`pnpm install\` first`);
+    process.exit(1);
+  }
+  const dest = path.join(extDist, folder);
+  await cp(from, dest, { recursive: true });
+  outputs.push(rel(dest));
+}
+
 const iconsDir = path.join(extSrc, 'icons');
 const icons = (await readdir(iconsDir).catch(() => [])).filter((f) => f.endsWith('.png')).sort();
 if (icons.length === 0) {

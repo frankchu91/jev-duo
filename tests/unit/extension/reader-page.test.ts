@@ -19,6 +19,11 @@ import {
   render,
 } from '../../../src/extension/reader/reader';
 
+/** Every block now carries the box its overlay is positioned from (§5.1). These cases are about the
+ * page marks and the heading/passage split, so one arbitrary body-line box serves all of them; the
+ * geometry itself is covered in pdf-text.test.ts. */
+const BOX = { x: 72, y: 697.5, width: 215, height: 12.5 };
+
 describe('arxivHtmlUrl', () => {
   it('a bare arXiv id becomes the HTML twin', () => {
     expect(arxivHtmlUrl('https://arxiv.org/pdf/1706.03762')).toBe('https://arxiv.org/html/1706.03762');
@@ -94,7 +99,7 @@ describe('parse-failure status text', () => {
 describe('render', () => {
   it('always marks page 1, even though it is the very first block (lastPage starts at 0, not 1)', () => {
     const container = document.createElement('main');
-    const doc: PdfDoc = { title: 'One Page', blocks: [{ kind: 'passage', text: 'x'.repeat(50), page: 1 }] };
+    const doc: PdfDoc = { title: 'One Page', blocks: [{ kind: 'passage', text: 'x'.repeat(50), page: 1, box: BOX }] };
 
     const passages = render(doc, container);
 
@@ -108,8 +113,8 @@ describe('render', () => {
     const doc: PdfDoc = {
       title: 'Skips a page',
       blocks: [
-        { kind: 'passage', text: 'a'.repeat(50), page: 1 },
-        { kind: 'passage', text: 'b'.repeat(50), page: 3 }, // page 2 contributed nothing (e.g. a figure-only page)
+        { kind: 'passage', text: 'a'.repeat(50), page: 1, box: BOX },
+        { kind: 'passage', text: 'b'.repeat(50), page: 3, box: BOX }, // page 2 contributed nothing (e.g. a figure-only page)
       ],
     };
 
@@ -125,8 +130,8 @@ describe('render', () => {
     const doc: PdfDoc = {
       title: 'Sample Paper',
       blocks: [
-        { kind: 'heading', text: '1 Introduction', page: 1 },
-        { kind: 'passage', text: 'x'.repeat(50), page: 1 },
+        { kind: 'heading', text: '1 Introduction', page: 1, box: BOX },
+        { kind: 'passage', text: 'x'.repeat(50), page: 1, box: BOX },
       ],
     };
 
@@ -140,7 +145,7 @@ describe('render', () => {
 
   it("a doc with no passage blocks (only headings) yields no passages — read()'s cue for the OCR status instead of mounting an empty reader", () => {
     const container = document.createElement('main');
-    const doc: PdfDoc = { title: 'Scanned', blocks: [{ kind: 'heading', text: 'Title only', page: 1 }] };
+    const doc: PdfDoc = { title: 'Scanned', blocks: [{ kind: 'heading', text: 'Title only', page: 1, box: BOX }] };
 
     const passages = render(doc, container);
 

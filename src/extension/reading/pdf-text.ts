@@ -14,14 +14,29 @@ export interface TextItem {
   rotated: boolean;
 }
 
+/** A rectangle in PDF user space: origin bottom-left, y up, points. The one geometry type the reader
+ * page speaks — everything it draws goes through `toPercentBox` first. */
+export interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface PageText {
   page: number;
   width: number;
   height: number;
+  /** `page.view[0]`/`page.view[1]`: 0 for a synthetic page, non-zero for a cropped one, and the
+   * reason `toPercentBox` subtracts rather than divides straight away. */
+  originX: number;
+  originY: number;
   items: TextItem[];
 }
 
-export type Block = { kind: 'heading'; text: string; page: number } | { kind: 'passage'; text: string; page: number };
+export type Block =
+  | { kind: 'heading'; text: string; page: number; box: Box }
+  | { kind: 'passage'; text: string; page: number; box: Box };
 
 export interface PdfDoc {
   title: string;
@@ -57,6 +72,7 @@ interface Draft {
   text: string;
   page: number;
   size: number;
+  box: Box;
 }
 
 /** §6.1.2. Items join the CURRENT line, in the order pdf.js emitted them: a global sort by y would
@@ -189,6 +205,22 @@ function readingOrder(lines: Line[]): Line[] {
  * is the bug this shape rules out. */
 const isHeading = (size: number, length: number, body: number): boolean => size >= HEADING_FACTOR * body && length <= HEADING_MAX_CHARS;
 
+/** §5.1's line box: the baseline `y` with a quarter em of descent below it and one em of ascent above.
+ * pdf.js reports a baseline and a width and nothing else, so the height is inferred from the size. */
+const lineBox = (line: Line): Box => ({
+  x: line.x,
+  y: line.y - 0.25 * line.size,
+  width: line.right - line.x,
+  height: 1.25 * line.size,
+});
+
+/** The smallest box containing both. A block's box is its lines' boxes folded through this. */
+function unionBox(a: Box, b: Box): Box {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+}
+
 /** §6.1.6's join rule: a trailing hyphen before a lowercase continuation is a word broken across
  * lines; a hyphen before anything else (a compound, a capitalised name) is part of the word. */
 function joinInto(text: string, next: string): string {
@@ -202,13 +234,14 @@ function draftsOfPage(ordered: Line[], body: number): Draft[] {
   let text = '';
   let size = 0;
   let page = 0;
+  let box: Box = { x: 0, y: 0, width: 0, height: 0 };
 
   const flush = (): void => {
     if (text === '') return;
     // §6.1.7: a big short block is a heading, anything else long enough is a passage, the rest is
     // dropped — a stray line of page furniture never becomes something to judge.
-    if (isHeading(size, text.length, body)) out.push({ kind: 'heading', text, page, size });
-    else if (text.length >= MIN_PASSAGE_CHARS) out.push({ kind: 'passage', text, page, size });
+    if (isHeading(size, text.length, body)) out.push({ kind: 'heading', text, page, size, box });
+    else if (text.length >= MIN_PASSAGE_CHARS) out.push({ kind: 'passage', text, page, size, box });
     text = '';
   };
 
@@ -224,8 +257,10 @@ function draftsOfPage(ordered: Line[], body: number): Draft[] {
       text = line.text;
       size = line.size;
       page = line.page;
+      box = lineBox(line);
     } else {
       text = joinInto(text, line.text);
+      box = unionBox(box, lineBox(line));
     }
     prev = line;
   }
@@ -265,7 +300,28 @@ export function pagesToBlocks(pages: PageText[], fallbackTitle: string): PdfDoc 
       if (headings >= MAX_PASSAGES) continue;
       headings += 1;
     }
-    blocks.push({ kind: draft.kind, text: draft.text, page: draft.page });
+    blocks.push({ kind: draft.kind, text: draft.text, page: draft.page, box: draft.box });
   }
   return { title, blocks };
+}
+
+const clampPercent = (v: number): number => (v < 0 ? 0 : v > 100 ? 100 : v);
+const percent = (v: number): string => `${clampPercent(v).toFixed(3)}%`;
+
+/** §5.1. PDF user space to the CSS percentages an overlay is positioned by: subtract the page origin,
+ * flip the y axis (PDF counts up from the bottom, CSS down from the top), scale to the page, clamp.
+ *
+ * Percentages, not pixels, is the whole trick: the overlays stay correct at any rendered canvas size,
+ * so a window resize costs nothing to recompute and a canvas re-rendered at a new width needs no
+ * second pass over the geometry. */
+export function toPercentBox(
+  box: Box,
+  page: { width: number; height: number; originX: number; originY: number },
+): { left: string; top: string; width: string; height: string } {
+  return {
+    left: percent(((box.x - page.originX) / page.width) * 100),
+    top: percent(((page.originY + page.height - (box.y + box.height)) / page.height) * 100),
+    width: percent((box.width / page.width) * 100),
+    height: percent((box.height / page.height) * 100),
+  };
 }

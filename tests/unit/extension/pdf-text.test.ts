@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pagesToBlocks, type PageText, type TextItem } from '../../../src/extension/reading/pdf-text';
+import { pagesToBlocks, toPercentBox, type Box, type PageText, type TextItem } from '../../../src/extension/reading/pdf-text';
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
@@ -9,8 +9,10 @@ function item(str: string, x: number, y: number, size = 10, opts: { width?: numb
   return { str, x, y, size, width: opts.width ?? str.length * size * 0.5, rotated: opts.rotated ?? false };
 }
 
-function page(n: number, items: TextItem[]): PageText {
-  return { page: n, width: PAGE_WIDTH, height: PAGE_HEIGHT, items };
+/** A page of `items`. `origin` is `page.view[0]`/`[1]` — 0 for anything synthetic, non-zero only for a
+ * cropped page, which the last toPercentBox case below covers directly. */
+function page(n: number, items: TextItem[], origin: { x: number; y: number } = { x: 0, y: 0 }): PageText {
+  return { page: n, width: PAGE_WIDTH, height: PAGE_HEIGHT, originX: origin.x, originY: origin.y, items };
 }
 
 const texts = (pages: PageText[], kind: 'heading' | 'passage'): string[] =>
@@ -211,5 +213,89 @@ describe('pagesToBlocks caps', () => {
     expect(doc.blocks.filter((b) => b.kind === 'heading')).toHaveLength(600);
     expect(doc.blocks.filter((b) => b.kind === 'passage')).toHaveLength(600);
     expect(doc.blocks).toHaveLength(1200);
+  });
+});
+
+// --- Design addendum 2026-09-23 §5.1: where each block SITS, so the reader can draw on the page ---
+
+describe('pagesToBlocks boxes', () => {
+  const boxes = (pages: PageText[], kind: 'heading' | 'passage'): Box[] =>
+    pagesToBlocks(pages, 'fallback').blocks.filter((b) => b.kind === kind).map((b) => b.box);
+
+  it("a single line's box is one em above the baseline and a quarter em below it", () => {
+    // `item` measures width as chars x size x 0.5, so this 43-character line is 215 pt wide.
+    expect(boxes([page(1, [item(SENTENCE, 72, 700, 10)])], 'passage')).toEqual([{ x: 72, y: 697.5, width: 215, height: 12.5 }]);
+  });
+
+  it("a three-line block's box is the union of its lines' boxes", () => {
+    const lines = [
+      item(SENTENCE, 72, 700, 10), // 43 chars -> right 287
+      item('Second line here.', 72, 686, 10), // 17 chars -> right 157
+      item('A third line that is longer than the first one.', 72, 672, 10), // 47 chars -> right 307
+    ];
+
+    // x/width from the widest line, y from the lowest baseline's descent, top from the highest ascent.
+    expect(boxes([page(1, lines)], 'passage')).toEqual([{ x: 72, y: 669.5, width: 235, height: 40.5 }]);
+  });
+
+  it('a two-column band gives the two blocks disjoint boxes', () => {
+    const full = (str: string, y: number, size = 10): TextItem => item(str, 72, y, size, { width: 468 });
+    const pages = [
+      page(1, [
+        full('A Two Column Paper', 740, 18),
+        item(`LEFT. ${SENTENCE}`, 72, 700, 10, { width: 200 }),
+        item('More of the left column here.', 72, 686, 10, { width: 200 }),
+        item(`RIGHT. ${SENTENCE}`, 340, 700, 10, { width: 200 }),
+        item('More of the right column here.', 340, 686, 10, { width: 200 }),
+      ]),
+    ];
+
+    const [left, right] = boxes(pages, 'passage');
+    expect(left).toEqual({ x: 72, y: 683.5, width: 200, height: 26.5 });
+    expect(right).toEqual({ x: 340, y: 683.5, width: 200, height: 26.5 });
+    expect(left.x + left.width).toBeLessThanOrEqual(right.x); // no overlap: two overlays, two columns
+  });
+
+  it('headings carry boxes too', () => {
+    const full = (str: string, y: number, size = 10): TextItem => item(str, 72, y, size, { width: 468 });
+    const pages = [page(1, [full('A Two Column Paper', 740, 18), item(SENTENCE, 72, 700, 10), item('More body text here.', 72, 686, 10)])];
+
+    expect(boxes(pages, 'heading')).toEqual([{ x: 72, y: 735.5, width: 468, height: 22.5 }]);
+  });
+});
+
+describe('toPercentBox', () => {
+  const LETTER = { width: 612, height: 792, originX: 0, originY: 0 };
+
+  it('projects a box on a letter page whose origin is (0, 0)', () => {
+    expect(toPercentBox({ x: 61.2, y: 396, width: 306, height: 79.2 }, LETTER)).toEqual({
+      left: '10.000%',
+      top: '40.000%',
+      width: '50.000%',
+      height: '10.000%',
+    });
+  });
+
+  it("subtracts a cropped page's origin from both axes", () => {
+    // The same box, shifted by the origin: the same place on the page.
+    expect(toPercentBox({ x: 71.2, y: 416, width: 306, height: 79.2 }, { width: 612, height: 792, originX: 10, originY: 20 })).toEqual({
+      left: '10.000%',
+      top: '40.000%',
+      width: '50.000%',
+      height: '10.000%',
+    });
+  });
+
+  it('flips the y axis: a box near the top of the page has a small `top`', () => {
+    expect(toPercentBox({ x: 0, y: 752.4, width: 612, height: 39.6 }, LETTER)).toMatchObject({ top: '0.000%', height: '5.000%' });
+  });
+
+  it('clamps a box that pokes past every edge', () => {
+    expect(toPercentBox({ x: -50, y: -20, width: 1000, height: 900 }, LETTER)).toEqual({
+      left: '0.000%',
+      top: '0.000%',
+      width: '100.000%',
+      height: '100.000%',
+    });
   });
 });

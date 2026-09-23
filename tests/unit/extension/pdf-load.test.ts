@@ -2,12 +2,12 @@
 // committed fixture. Everything else about the PDF path is driven from synthetic PageText, so this is
 // specifically the "do our transform/view readings match what pdf.js actually reports?" test.
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { loadPages, type PdfjsLike } from '../../../src/extension/reading/pdf-load';
+import { loadPages, openPdf, type PdfjsLike, type PdfPageLike } from '../../../src/extension/reading/pdf-load';
 import { pagesToBlocks } from '../../../src/extension/reading/pdf-text';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -61,6 +61,109 @@ describe('loadPages on tests/e2e/fixtures/sample.pdf', () => {
     // left as a stray single line.
     expect(passages.some((b) => b.text.includes('Positional information is represented by fixed sinusoidal functions of the position index'))).toBe(true);
   });
+
+  it('openPdf reports the page origins and hands back a working destroy', async () => {
+    const opened = await openPdf(await sampleBytes(), await legacyPdfjs());
+    try {
+      expect(opened.metaTitle).toBe('Sample Paper');
+      expect(opened.pages.map((p) => p.page)).toEqual([1, 2]);
+      // An uncropped letter page: MediaBox starts at (0, 0), so both origins are 0.
+      expect(opened.pages.map((p) => [p.originX, p.originY])).toEqual([
+        [0, 0],
+        [0, 0],
+      ]);
+      expect(opened.pages[0].width).toBe(612);
+      expect(opened.pages[0].height).toBe(792);
+    } finally {
+      await opened.destroy(); // the loading task, not just the document: no worker is left alive
+    }
+  });
+});
+
+// --- Design addendum 2026-09-23 §5.2: the page as PIXELS, against a pdf.js that is not pdf.js ---
+
+/** A one-page pdf.js stand-in. `getViewport({ scale })` scales a letter page; `render` records the
+ * `{ canvas, viewport }` it was handed (pdf.js 6 takes the canvas itself, not a 2d context) and
+ * resolves — or rejects — with whatever `onRender` does. */
+function fakePdfjs(onRender: () => Promise<void> = () => Promise.resolve()): {
+  pdfjs: PdfjsLike;
+  calls: Array<{ canvas: HTMLCanvasElement; viewport: { width: number; height: number } }>;
+  params: Array<Record<string, unknown>>;
+} {
+  const calls: Array<{ canvas: HTMLCanvasElement; viewport: { width: number; height: number } }> = [];
+  const params: Array<Record<string, unknown>> = [];
+  const page: PdfPageLike = {
+    view: [0, 0, 612, 792],
+    async getTextContent() {
+      return { items: [] };
+    },
+    getViewport({ scale }) {
+      return { width: 612 * scale, height: 792 * scale };
+    },
+    render(args) {
+      calls.push(args);
+      return { promise: onRender() };
+    },
+  };
+  const pdfjs: PdfjsLike = {
+    getDocument(p) {
+      params.push(p);
+      return {
+        promise: Promise.resolve({ numPages: 1, getPage: async () => page, getMetadata: async () => ({}) }),
+        destroy: async () => {},
+      };
+    },
+  };
+  return { pdfjs, calls, params };
+}
+
+/** This file runs under the node environment (no DOM at all), and `renderPage` only ever writes
+ * `width`/`height` — so a bare object is the honest stand-in for a canvas here. */
+const fakeCanvas = (): HTMLCanvasElement => ({ width: 0, height: 0 }) as unknown as HTMLCanvasElement;
+
+describe('openPdf renderPage', () => {
+  it('sizes the canvas from cssWidth x pixelRatio, rounding up, and renders exactly once', async () => {
+    const { pdfjs, calls } = fakePdfjs();
+    const opened = await openPdf(new ArrayBuffer(8), pdfjs);
+    const canvas = fakeCanvas();
+
+    await opened.renderPage(1, canvas, 800, 2);
+
+    // scale = 800 / 612 x 2 = 2.6143…; 612 x scale is exactly 1600, 792 x scale is 2070.588… -> 2071.
+    expect(canvas.width).toBe(1600);
+    expect(canvas.height).toBe(2071);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].canvas).toBe(canvas);
+    expect(calls[0].viewport.width).toBe(1600);
+  });
+
+  it('propagates a rejecting render to the caller rather than swallowing it', async () => {
+    const { pdfjs } = fakePdfjs(() => Promise.reject(new Error('canvas is gone')));
+    const opened = await openPdf(new ArrayBuffer(8), pdfjs);
+
+    await expect(opened.renderPage(1, fakeCanvas(), 800, 2)).rejects.toThrow('canvas is gone');
+  });
+
+  it('passes the runtime assets and both hardening flags to getDocument', async () => {
+    const { pdfjs, params } = fakePdfjs();
+
+    const opened = await openPdf(new ArrayBuffer(8), pdfjs, {
+      standardFontDataUrl: 'chrome-extension://x/standard_fonts/',
+      cMapUrl: 'chrome-extension://x/cmaps/',
+      cMapPacked: true,
+      wasmUrl: 'chrome-extension://x/wasm/',
+    });
+    await opened.destroy();
+
+    expect(params[0]).toMatchObject({
+      isEvalSupported: false,
+      useSystemFonts: false,
+      standardFontDataUrl: 'chrome-extension://x/standard_fonts/',
+      cMapUrl: 'chrome-extension://x/cmaps/',
+      cMapPacked: true,
+      wasmUrl: 'chrome-extension://x/wasm/',
+    });
+  });
 });
 
 // Final wave, IMPORTANT: pdfjs-dist@6 declares `engines.node >= 22.13` while this package publishes
@@ -81,5 +184,19 @@ describe('pdfjs-dist packaging', () => {
       .filter((file) => file.endsWith('.ts'))
       .filter((file) => /from '(pdfjs-dist)/.test(readFileSync(path.join(src, file), 'utf8')));
     expect(importers).toEqual([path.join('extension', 'reader', 'reader.ts')]);
+  });
+
+  // §5.3's assets. pdf.js keeps three things out of its bundle and fetches them at runtime, so the
+  // build has to copy them next to the reader. The COPIES are asserted by tests/e2e/reading.spec.ts,
+  // which always runs against a real `pnpm build`; this side asserts the sources exist and that the
+  // build script names all three, because `pnpm check` runs `pnpm test` BEFORE `pnpm build` and a
+  // unit test that read dist/ would fail on a clean tree.
+  it('the standard fonts, cmaps and wasm decoders are present and named by the build script', () => {
+    for (const folder of ['standard_fonts', 'cmaps', 'wasm']) {
+      const dir = path.join(ROOT, 'node_modules', 'pdfjs-dist', folder);
+      expect(existsSync(dir)).toBe(true);
+      expect(readdirSync(dir).length).toBeGreaterThan(0);
+    }
+    expect(readFileSync(path.join(ROOT, 'scripts', 'build.mjs'), 'utf8')).toContain("['standard_fonts', 'cmaps', 'wasm']");
   });
 });
