@@ -40,6 +40,7 @@
     "test:e2e:live": "LIVE=1 playwright test",
     "build": "node scripts/build.mjs",
     "build:icons": "node scripts/make-icons.mjs",
+    "fixtures:pdf": "node tests/e2e/fixtures/make-sample-pdf.mjs",
     "package:ext": "node scripts/package-extension.mjs",
     "prepublishOnly": "pnpm build",
     "check": "pnpm typecheck && pnpm test && pnpm build"
@@ -51,6 +52,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",
+    "pdfjs-dist": "^6.3.289",
     "zod": "^4.6.5"
   },
   "devDependencies": {
