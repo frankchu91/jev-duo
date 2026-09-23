@@ -102,26 +102,76 @@ test('a page that is not an article is left alone, and the popup says so', async
   await page.close();
 });
 
-test('the reader page reads a PDF fetched from a host the manifest allows', async () => {
+test('the reader page renders a PDF in place and draws the highlights on it', async () => {
   // The e2e's patched manifest declares the fixture origin as a host permission, which is what the
   // reader page's "Allow access" button would otherwise have to ask for.
-  const page = await ext.context.newPage();
-  await page.goto(`chrome-extension://${ext.extensionId}/reader.html?src=${encodeURIComponent(`${FIXTURE_ORIGIN}/sample.pdf`)}`);
+  //
+  // Opened with chrome.tabs.create — exactly how the popup's "Open the PDF reader" link opens it —
+  // rather than Playwright's newPage()+goto(): the latter pushes an extra about:blank entry onto the
+  // fresh page's session history that a real new tab never carries, which would trip the #back
+  // assertion below for a reason that has nothing to do with the reader.
+  const readerUrl = `chrome-extension://${ext.extensionId}/reader.html?src=${encodeURIComponent(`${FIXTURE_ORIGIN}/sample.pdf`)}`;
+  const sw = ext.context.serviceWorkers()[0] ?? ext.sw;
+  const [page] = await Promise.all([ext.context.waitForEvent('page'), sw.evaluate((url: string) => chrome.tabs.create({ url }), readerUrl)]);
+  await page.waitForLoadState();
 
-  // Exactly what make-sample-pdf.mjs draws: four paragraphs per page, one page mark per page, and
-  // four headings (the title block plus the three numbered ones).
-  await expect(page.locator('.jd-passage')).toHaveCount(8);
+  // Exactly what make-sample-pdf.mjs draws: two pages, eight passages across them. Headings are drawn
+  // on the canvas rather than overlaid, so there is no .jd-heading any more.
+  await expect(page.locator('.jd-page')).toHaveCount(2);
+  await expect(page.locator('.jd-block')).toHaveCount(8);
   await expect(page.locator('.jd-page-mark')).toHaveCount(2);
-  await expect(page.locator('.jd-heading')).toHaveCount(4);
   await expect(page.locator('h1')).toHaveText('Sample Paper');
 
-  // The method paragraph is the one MOCK_FIXTURES pins to core 0.95 — the same text the generator
-  // draws across three lines on page two, rejoined by the extractor.
-  await expect(page.locator('.jd-passage', { hasText: 'every position attends to every other position' })).toHaveClass(/jd-hl/);
-  await expect(page.locator('#jd-reader ol li')).not.toHaveCount(0);
+  // Headless Chromium really rasterises: the first page's canvas holds device pixels once its section
+  // is near the viewport, which with a 150 % root margin is immediately.
+  await expect
+    .poll(() => page.locator('.jd-page').first().locator('canvas').evaluate((c) => (c as HTMLCanvasElement).width))
+    .toBeGreaterThan(0);
+  await expect(page.locator('.jd-page').first()).not.toHaveClass(/jd-render-failed/);
+
+  // The method paragraph is the one MOCK_FIXTURES pins to core 0.95; only highlights are listed, so
+  // its row in the panel is also the proof that its overlay carries jd-hl.
+  const highlights = await page.locator('.jd-block.jd-hl').count();
+  expect(highlights).toBeGreaterThanOrEqual(1);
+  await expect(page.locator('#jd-reader ol li')).toHaveCount(highlights);
+  await expect(page.locator('#jd-reader ol li', { hasText: 'The method encodes each input token as a vector' })).toHaveCount(1);
   await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+  await expect(page.locator('#jd-reader p.error')).toHaveText('');
+
+  // Clicking a row takes you to its overlay; the flash is the half of that a headless run can assert.
+  await page.locator('#jd-reader ol li').first().click();
+  await expect(page.locator('.jd-block.jd-flash')).toHaveCount(1);
+
+  // A reader opened in a fresh tab has nothing to go back to.
+  await expect(page.locator('#back')).toBeHidden();
 
   await page.close();
+});
+
+test('Read this PDF replaces the PDF in the tab that was showing it', async () => {
+  const pdfUrl = `${FIXTURE_ORIGIN}/sample.pdf`;
+  const tab = await ext.context.newPage();
+  // Chromium's own viewer displays the file. A build that downloaded it instead would reject here and
+  // leave the tab elsewhere, which the next line reports plainly rather than three assertions later.
+  await tab.goto(pdfUrl).catch(() => undefined);
+  expect(tab.url()).toBe(pdfUrl);
+
+  const popup = await ext.context.newPage();
+  await popup.goto(`chrome-extension://${ext.extensionId}/popup.html?jd-tab=${encodeURIComponent(pdfUrl)}`);
+  const pagesBefore = ext.context.pages().length;
+
+  await popup.locator('#read-pdf').click();
+
+  // The SAME tab navigates to the reader: no new page is opened anywhere in the context.
+  await expect.poll(() => tab.url()).toMatch(/^chrome-extension:\/\/[a-p]+\/reader\.html\?src=/);
+  expect(ext.context.pages()).toHaveLength(pagesBefore);
+  await expect(tab.locator('.jd-block')).toHaveCount(8);
+  await expect(tab.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+  // ...and Chrome's viewer is exactly one entry back.
+  await expect(tab.locator('#back')).toBeVisible();
+
+  await popup.close();
+  await tab.close();
 });
 
 test('the reader page reads a PDF picked from disk', async () => {
@@ -131,14 +181,14 @@ test('the reader page reads a PDF picked from disk', async () => {
 
   await page.setInputFiles('#file', SAMPLE_PDF);
 
-  // Same assertions as the URL path: a picked file goes through the identical parse/render/judge flow.
-  await expect(page.locator('.jd-passage')).toHaveCount(8);
+  // Same assertions as the URL path: a picked file goes through the identical open/render/judge flow.
+  await expect(page.locator('.jd-block')).toHaveCount(8);
+  await expect(page.locator('.jd-page')).toHaveCount(2);
   await expect(page.locator('.jd-page-mark')).toHaveCount(2);
-  await expect(page.locator('.jd-heading')).toHaveCount(4);
   await expect(page.locator('h1')).toHaveText('Sample Paper');
-  await expect(page.locator('.jd-passage', { hasText: 'every position attends to every other position' })).toHaveClass(/jd-hl/);
   await expect(page.locator('#jd-reader ol li')).not.toHaveCount(0);
   await expect(page.locator('#jd-reader .progress')).toHaveText(/^8 passages · /);
+  await expect(page.locator('#back')).toBeHidden();
 
   await page.close();
 });
@@ -151,11 +201,11 @@ test('a PDF that fails to parse shows a status instead of hanging, and the picke
 
   await expect(page.locator('#status')).toHaveText(/^can't read this PDF: /);
   await expect(page.locator('#status')).toHaveClass(/error/);
-  await expect(page.locator('.jd-passage')).toHaveCount(0);
+  await expect(page.locator('.jd-block')).toHaveCount(0);
 
   // The picker is never disabled by a failure: picking a real PDF afterward still works.
   await page.setInputFiles('#file', SAMPLE_PDF);
-  await expect(page.locator('.jd-passage')).toHaveCount(8);
+  await expect(page.locator('.jd-block')).toHaveCount(8);
   await expect(page.locator('#status')).not.toHaveClass(/error/);
 
   await page.close();
@@ -167,10 +217,10 @@ test('an empty or non-http(s) src is rejected up front, with the picker still av
 
   await expect(page.locator('#status')).toHaveText('not a PDF URL');
   await expect(page.locator('#status')).toHaveClass(/error/);
-  await expect(page.locator('.jd-passage')).toHaveCount(0);
+  await expect(page.locator('.jd-block')).toHaveCount(0);
 
   await page.setInputFiles('#file', SAMPLE_PDF);
-  await expect(page.locator('.jd-passage')).toHaveCount(8);
+  await expect(page.locator('.jd-block')).toHaveCount(8);
 
   await page.close();
 });

@@ -136,14 +136,20 @@ popup says `this page does not look like an article (N passages)` and nothing is
 needs at least 6 paragraphs and 1500 characters inside one container to call something an article.
 
 **On a PDF.** The popup swaps in **Read this PDF** when the tab looks like one (a `.pdf` path, or an
-arXiv `/pdf/` URL); **Open the PDF reader** in the hint line opens the same page empty. The reader
-fetches the PDF, extracts its text — paragraphs rejoined across line breaks, running headers and page
-numbers dropped, two-column pages read in the right order — and reads it exactly as it reads a page,
-with a `p. N` mark before each page's first block. A host that does not send permissive CORS headers
-needs its own permission: the reader says `can't fetch this file from <origin>` and offers **Allow
-access to <origin>**, which asks Chrome for that one origin. **Open a PDF from your computer** reads a
-local file instead, which never touches the network at all. For an arXiv PDF the reader points at the
-HTML version of the same paper, which has real paragraphs and reads better.
+arXiv `/pdf/` URL). It replaces Chrome's PDF viewer **in that same tab** with jev-duo's own reader,
+which renders the same pages with pdf.js and draws the highlights straight onto them: a highlighted
+passage gets the left rule and the `<kind> · <confidence>` tag over the text it was extracted from,
+and filler is veiled in white that lifts when you hover it. **← Back to the PDF** in the header
+returns you to Chrome's viewer. (Chrome does not let any extension script its built-in PDF viewer —
+it is a MIME-handler frame no content script can enter — so replacing it is the closest possible
+thing.) **Open the PDF reader** in the hint line opens the reader empty, in a new tab. A host that
+does not send permissive CORS headers needs its own permission: the reader says
+`can't fetch this file from <origin>` and offers **Allow access to <origin>**, which asks Chrome for
+that one origin. **Open a PDF from your computer** reads a local file instead, which never touches
+the network at all. For an arXiv PDF the reader points at the HTML version of the same paper, which
+has real paragraphs and reads better. Pages are rendered as you reach them and released again once
+you are well past them, so a long PDF does not sit in memory all at once; if a page cannot be
+rendered, its passages are shown as text in place so they stay readable and judgeable.
 
 **What is sent.** Per passage: the passage text (capped at 1500 characters), the document title
 (capped at 200 characters) and its lead (capped at 600). Nothing else — no URL, no page, no
@@ -155,7 +161,15 @@ nothing else about you leaves the browser.
 
 **Limits.** Reading is explicit, per document, and never runs on its own. Judgments use fixed
 thresholds — the **Strictness** slider is a feed-mode control and does not apply. A passage whose
-judgment fails or times out is shown plain rather than dimmed. Documents are capped at 600 passages.
+judgment fails or times out is shown plain rather than dimmed, and when anything failed the panel
+prints a second line naming the last error. Documents are capped at 600 passages.
+
+**After updating an unpacked install.** Chrome keeps the old service worker running until you reload
+the extension, and the old one has no idea what reading mode is — so the popup disables **Read this
+page**/**Read this PDF** and says `reload the extension at chrome://extensions (↻) to finish
+updating`. If a read got through anyway, the panel says
+`the extension was updated — reload it at chrome://extensions (↻) and read again` instead of a bare
+error count. Reload at `chrome://extensions` with the ↻ button and read again.
 
 ## CLI
 
@@ -304,8 +318,9 @@ Five things that make its job easier:
   which jev-duo does not do — the reader says so rather than showing an empty document), no `file://`
   URLs (use **Open a PDF from your computer**), no reading on page load, no figures, math or tables
   (a table is flattened into one run of text before it is judged, when it is not excluded outright),
-  no comment filtering, no DOCX or EPUB, and no Firefox. The strictness slider does not apply to
-  reading: it uses fixed thresholds.
+  no comment filtering, no DOCX or EPUB, and no Firefox. There is no text selection on a rendered PDF
+  page: the page is a picture with passage overlays on it, not a text layer. The strictness slider
+  does not apply to reading: it uses fixed thresholds.
 - **English first.** The compiler prompt and the mock compiler both assume English intents.
 - **v1 uses Noul questions only.** Jev's Choice and Score primitives are implemented in the provider
   layer but no v1 feature needs them, so nothing sorts or scores your feed yet.

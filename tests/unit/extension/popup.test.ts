@@ -1048,7 +1048,9 @@ describe('initPopup', () => {
       doc.dispatchEvent(new Event('unload'));
     });
 
-    it('Read this PDF opens the reader page on the tab url, and the hint link opens it empty', async () => {
+    // --- Design addendum 2026-09-23 §4: the PDF is replaced where it is, not copied to a new tab ---
+
+    it('Read this PDF replaces the PDF in its own tab; the hint link still opens a new one', async () => {
       const stub = withTabs([{ id: 7, url: 'https://example.test/paper.pdf' }]);
       const doc = loadDoc();
       await initPopup(doc, { send: asSend(stateSend()) });
@@ -1057,10 +1059,27 @@ describe('initPopup', () => {
       el<HTMLAnchorElement>(doc, 'open-reader').click();
       await flush();
 
-      expect(stub.createdTabs()).toEqual([
-        `${EXTENSION_ORIGIN}/reader.html?src=${encodeURIComponent('https://example.test/paper.pdf')}`,
-        `${EXTENSION_ORIGIN}/reader.html`,
+      expect(stub.updatedTabs()).toEqual([
+        { tabId: 7, url: `${EXTENSION_ORIGIN}/reader.html?src=${encodeURIComponent('https://example.test/paper.pdf')}` },
       ]);
+      // Open the PDF reader has nothing to replace, so it keeps opening a tab of its own.
+      expect(stub.createdTabs()).toEqual([`${EXTENSION_ORIGIN}/reader.html`]);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('Read this PDF with no tab id says so and navigates nothing', async () => {
+      const stub = withTabs([{ url: 'https://example.test/paper.pdf' }]); // a URL but no id
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      el<HTMLButtonElement>(doc, 'read-pdf').click();
+      await flush();
+
+      expect(el(doc, 'read-status').textContent).toBe("can't read this tab: no tab id");
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
+      expect(stub.updatedTabs()).toEqual([]);
+      expect(stub.createdTabs()).toEqual([]);
 
       doc.dispatchEvent(new Event('unload'));
     });

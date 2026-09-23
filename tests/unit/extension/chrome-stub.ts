@@ -53,6 +53,9 @@ export interface ChromeStub {
   denyNextPermissionRequest(): void;
   /** Every url passed to `chrome.tabs.create`, oldest first. */
   createdTabs(): string[];
+  /** Every `(tabId, url)` passed to `chrome.tabs.update`, oldest first — how a test sees the popup
+   * replacing a PDF in the tab that was showing it rather than opening a new one. */
+  updatedTabs(): Array<{ tabId: number; url: string }>;
 }
 
 export function installChromeStub(): ChromeStub {
@@ -60,6 +63,7 @@ export function installChromeStub(): ChromeStub {
   let lastError: { message: string } | undefined;
   let tabs: Array<{ id?: number; url?: string; title?: string }> = [];
   const createdTabs: string[] = [];
+  const updatedTabs: Array<{ tabId: number; url: string }> = [];
 
   // In-memory stand-in for the origin patterns Chrome would actually hold host permission for (e.g.
   // "https://mastodon.social/*"), and for the extension's dynamically registered content scripts,
@@ -167,6 +171,10 @@ export function installChromeStub(): ChromeStub {
         createdTabs.push(props.url);
         return { id: 999 };
       },
+      async update(tabId: number, props: { url?: string }): Promise<{ id: number; url?: string }> {
+        updatedTabs.push({ tabId, url: props.url ?? '' });
+        return { id: tabId, url: props.url };
+      },
     },
     permissions,
     scripting,
@@ -189,5 +197,6 @@ export function installChromeStub(): ChromeStub {
       denyNextRequest = true;
     },
     createdTabs: () => [...createdTabs],
+    updatedTabs: () => [...updatedTabs],
   };
 }

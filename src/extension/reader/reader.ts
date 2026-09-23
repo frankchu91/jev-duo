@@ -7,20 +7,20 @@
 // The PDF bytes never leave the browser (§11): only the extracted passages, the title and the lead
 // are ever sent, to the same provider the rest of the extension uses.
 //
-// The pure pieces below (status text, `isFetchableUrl`, `arxivHtmlUrl`, `render`) are exported and
-// unit-tested directly (tests/unit/extension/reader-page.test.ts, jsdom, no chrome stub needed).
-// Everything that touches chrome.*, fetch or pdf.js lives inside `wireUp`, called only when this is
-// really running as the extension page (see the guard at the bottom) — importing this module for its
-// pure exports must never reach for a DOM it did not build or fire off a real fetch.
+// The pure pieces below (status text, `isFetchableUrl`, `arxivHtmlUrl`) are exported and unit-tested
+// directly (tests/unit/extension/reader-page.test.ts, jsdom, no chrome stub needed); the page they
+// build lives in ./pages.ts and is tested the same way. Everything that touches chrome.*, fetch or
+// pdf.js lives inside `wireUp`, called only when this is really running as the extension page.
 
 import * as pdfjsLib from 'pdfjs-dist';
-import { LEAD_MAX, TITLE_MAX, passageId, type DocContext } from '../../core/reading';
+import { LEAD_MAX, TITLE_MAX, type DocContext } from '../../core/reading';
 import { send } from '../messages';
 import type { ArticlePassage } from '../reading/article';
-import { loadPages, type PdfjsLike } from '../reading/pdf-load';
+import { openPdf, type OpenedPdf, type PdfAssets, type PdfjsLike } from '../reading/pdf-load';
 import { pagesToBlocks, type PdfDoc } from '../reading/pdf-text';
 import { mountReader, type ReaderHandle } from '../reading/reader-ui';
 import { runReading } from '../reading/run';
+import { mountPageRenderer, render, type PageRenderer } from './pages';
 
 // pdf.js's own types are far more specific than loadPages needs; one cast at the boundary keeps a
 // pdfjs-dist patch release from being able to break `pnpm typecheck`.
@@ -68,44 +68,17 @@ export function arxivHtmlUrl(raw: string): string | undefined {
   return id === '' ? undefined : `https://arxiv.org/html/${id}`;
 }
 
-/** Renders a parsed PdfDoc into `container` (cleared first): an `h1` for the title, a `div.jd-page-mark`
- * before each page's first block (page 1 included — `lastPage` starts at 0, which no real page number
- * equals), a `h2.jd-heading` per heading block and a `p.jd-passage` per passage block. A doc whose blocks
- * are all headings (or which has none at all) returns an empty array — the scanned-PDF case `read()`
- * reports as `NO_TEXT_STATUS` rather than mounting an empty reader. Takes its container explicitly so
- * it is testable with a bare element, without the rest of the page. */
-export function render(doc: PdfDoc, container: HTMLElement): ArticlePassage[] {
-  container.textContent = '';
-  const h1 = document.createElement('h1');
-  h1.textContent = doc.title;
-  container.appendChild(h1);
-
-  const passages: ArticlePassage[] = [];
-  let lastPage = 0;
-  for (const block of doc.blocks) {
-    if (block.page !== lastPage) {
-      lastPage = block.page;
-      const mark = document.createElement('div');
-      mark.className = 'jd-page-mark';
-      mark.textContent = `p. ${block.page}`;
-      container.appendChild(mark);
-    }
-    if (block.kind === 'heading') {
-      const h2 = document.createElement('h2');
-      h2.className = 'jd-heading';
-      h2.textContent = block.text;
-      container.appendChild(h2);
-      continue;
-    }
-    const p = document.createElement('p');
-    p.className = 'jd-passage';
-    p.dataset.index = String(passages.length);
-    p.dataset.page = String(block.page);
-    p.textContent = block.text;
-    container.appendChild(p);
-    passages.push({ id: passageId(block.text), index: passages.length, text: block.text, page: block.page, el: p });
-  }
-  return passages;
+/** §5.3's runtime assets, from the extension's own origin: the standard 14 fonts so a PDF set in Times
+ * is not blank, the cmaps so CJK-encoded text extracts, the wasm decoders so JPX/JBIG2 images render.
+ * A function rather than a constant because `chrome.runtime` does not exist when this module is merely
+ * imported by a test. */
+function pdfAssets(): PdfAssets {
+  return {
+    standardFontDataUrl: chrome.runtime.getURL('standard_fonts/'),
+    cMapUrl: chrome.runtime.getURL('cmaps/'),
+    cMapPacked: true,
+    wasmUrl: chrome.runtime.getURL('wasm/'),
+  };
 }
 
 function $<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -128,12 +101,19 @@ function wireUp(): void {
   const allowBtn = $<HTMLButtonElement>('allow');
   const fileEl = $<HTMLInputElement>('file');
   const docEl = $('doc');
+  const backEl = $<HTMLAnchorElement>('back');
 
   const src = new URLSearchParams(location.search).get('src') ?? undefined;
 
   let bytes: ArrayBuffer | undefined;
   let sourceName = src ?? '';
   let handle: ReaderHandle | undefined;
+  // The document stays OPEN for as long as it is on screen: its canvases are drawn from it on demand,
+  // and Read re-judges it with a new focus without re-fetching, re-parsing or re-rendering (§5.3).
+  let opened: OpenedPdf | undefined;
+  let renderer: PageRenderer | undefined;
+  let passages: ArticlePassage[] = [];
+  let title = '';
 
   function setStatus(text: string, isError = false): void {
     statusEl.textContent = text;
@@ -153,6 +133,18 @@ function wireUp(): void {
     link.textContent = 'open it';
     hintEl.append(link, ', then click Read this page — HTML gives better paragraphs than a PDF.');
   }
+
+  /** §4. Only a reader that REPLACED something has something to go back to: a picker-only reader, or
+   * one opened in a fresh tab from the popup's hint link, does not — and Chrome's own PDF viewer is
+   * exactly one entry back in that tab's history, because `chrome.tabs.update` navigated it. */
+  function renderBack(): void {
+    backEl.hidden = !(src !== undefined && history.length > 1);
+  }
+
+  backEl.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    history.back();
+  });
 
   /** §6.3's permission fallback. `chrome.permissions.request` needs a user gesture, so it can only ever
    * be called from this click handler — never from the load path that discovered the problem. */
@@ -193,33 +185,63 @@ function wireUp(): void {
     }
   }
 
-  async function read(): Promise<void> {
-    if (!bytes) return;
+  /** Drops everything holding the current document: the panel, the canvases' observers, and the pdf.js
+   * worker. Called before a new document is opened, so two are never alive at once. */
+  async function closeDocument(): Promise<void> {
     handle?.destroy();
     handle = undefined;
-    setStatus('reading…');
+    renderer?.destroy();
+    renderer = undefined;
+    passages = [];
+    title = '';
+    const previous = opened;
+    opened = undefined;
+    await previous?.destroy();
+  }
 
+  /** bytes -> an open document, rendered in place. Returns false, with the status already set, when
+   * there is nothing to read. */
+  async function openDocument(data: ArrayBuffer): Promise<boolean> {
     let doc: PdfDoc;
-    let passages: ArticlePassage[];
     try {
-      // A COPY: pdf.js transfers the typed array it is given to its worker, which detaches the buffer —
-      // and the Read button re-reads the same document with a new focus.
-      const { pages, metaTitle } = await loadPages(bytes.slice(0), pdfjs);
-      doc = pagesToBlocks(pages, metaTitle ?? fileNameOf(sourceName));
-      passages = render(doc, docEl);
+      // A COPY: pdf.js transfers the typed array it is given to its worker, which detaches the buffer.
+      const pdf = await openPdf(data.slice(0), pdfjs, pdfAssets());
+      opened = pdf;
+      doc = pagesToBlocks(pdf.pages, pdf.metaTitle ?? fileNameOf(sourceName));
+      const built = render(doc, pdf.pages, docEl);
+      passages = built.passages;
+      renderer = mountPageRenderer({
+        sections: built.sections,
+        renderPage: (n, canvas, cssWidth, pixelRatio) => pdf.renderPage(n, canvas, cssWidth, pixelRatio),
+      });
     } catch (err) {
       // A corrupt file, a PDF pdf.js refuses without a password, or an HTML interstitial served at a
       // `.pdf` URL all reject here rather than resolving — caught so the status recovers instead of
       // sticking on "reading…" forever, and so the failure never escapes as an unhandled rejection.
       setStatus(parseErrorStatus(err), true);
-      return;
+      return false;
     }
+    title = doc.title;
     if (passages.length === 0) {
       setStatus(NO_TEXT_STATUS, true);
-      return;
+      return false;
     }
+    return true;
+  }
 
-    const ctx: DocContext = { title: doc.title.slice(0, TITLE_MAX), lead: passages[0].text.slice(0, LEAD_MAX), source: sourceName };
+  /** Mounts the panel over whatever is rendered and judges it. Opens the document first if it is not
+   * open yet, so pressing Read again re-judges the SAME rendered pages with a new focus (§5.3): no
+   * fetch, no re-parse, no re-render, and the canvases already drawn stay drawn. */
+  async function read(): Promise<void> {
+    handle?.destroy();
+    handle = undefined;
+    if (!opened) {
+      const data = bytes;
+      if (!data) return;
+      setStatus('reading…');
+      if (!(await openDocument(data))) return;
+    }
+    const ctx: DocContext = { title: title.slice(0, TITLE_MAX), lead: passages[0].text.slice(0, LEAD_MAX), source: sourceName };
     handle = mountReader(document, {
       passages,
       focus: focusEl.value,
@@ -235,6 +257,7 @@ function wireUp(): void {
     setStatus('loading…');
     const data = await fetchPdf(url);
     if (!data) return;
+    await closeDocument();
     bytes = data;
     sourceName = url;
     await read();
@@ -244,10 +267,12 @@ function wireUp(): void {
     const file = fileEl.files?.[0];
     if (!file) return;
     void (async () => {
-      // A picked file never touches the network at all, which is also the answer for file:// URLs
-      // (§13): the picker is how you read one. The picker itself is never disabled, so it stays usable
-      // after a failure — pick again and this fires again.
-      bytes = await file.arrayBuffer();
+      // A picked file never touches the network at all, which is also the answer for file:// URLs:
+      // the picker is how you read one. The picker itself is never disabled, so it stays usable after
+      // a failure — pick again and this fires again.
+      const data = await file.arrayBuffer();
+      await closeDocument();
+      bytes = data;
       sourceName = file.name;
       sourceEl.textContent = file.name;
       allowBtn.hidden = true;
@@ -271,6 +296,7 @@ function wireUp(): void {
   async function init(): Promise<void> {
     sourceEl.textContent = src ?? '';
     renderHint();
+    renderBack();
     // An extension page may ask for getState; a content script may not, which is why the injected
     // reader has to wait for the focus and this one does not.
     const state = await send({ type: 'getState' });

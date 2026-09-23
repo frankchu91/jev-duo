@@ -306,10 +306,25 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     setReadStatus(STALE_POPUP_STATUS, true);
   }
 
-  /** Opens the extension's own reader page, optionally pointed at a PDF. Not web-accessible: only
-   * the extension can navigate to it (§10). */
-  function openReader(src?: string): void {
-    void chrome.tabs.create({ url: chrome.runtime.getURL(`reader.html${src ? `?src=${encodeURIComponent(src)}` : ''}`) });
+  /** The extension's own reader page, optionally pointed at a PDF. Not web-accessible: only the
+   * extension can navigate to it (§10). */
+  const readerUrl = (source?: string): string => chrome.runtime.getURL(`reader.html${source ? `?src=${encodeURIComponent(source)}` : ''}`);
+
+  /** §4. **Read this PDF** REPLACES Chrome's PDF viewer in the tab that is showing it: that viewer is
+   * a MIME-handler frame no content script can enter, so replacing it is the closest an extension can
+   * get to drawing on it — and **Back to the PDF** in the reader's header puts it back.
+   * `chrome.tabs.update` needs no permission at all for the extension's own page. */
+  function readPdfInPlace(): void {
+    if (tabId === undefined) {
+      setReadStatus("can't read this tab: no tab id", true);
+      return;
+    }
+    void chrome.tabs.update(tabId, { url: readerUrl(tabUrl?.href) });
+  }
+
+  /** **Open the PDF reader** has nothing to replace, so it keeps opening a tab of its own. */
+  function openReader(): void {
+    void chrome.tabs.create({ url: readerUrl() });
   }
 
   function fillStats(stats: DuoStats, exampleCount: number): void {
@@ -483,7 +498,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     }),
   );
 
-  readPdfBtn.addEventListener('click', () => openReader(tabUrl?.href));
+  readPdfBtn.addEventListener('click', readPdfInPlace);
   openReaderEl.addEventListener('click', (ev) => {
     ev.preventDefault();
     openReader();
