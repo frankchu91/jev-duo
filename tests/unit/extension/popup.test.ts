@@ -1126,6 +1126,29 @@ describe('initPopup', () => {
       doc.dispatchEvent(new Event('unload'));
     });
 
+    // --- Review fix round 2, minor D: a background old enough to have no `build` field at all ---
+
+    it('disables both read buttons when the reply carries no build field at all', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/paper.pdf' }]);
+      const doc = loadDoc();
+      const state = getStateResponse();
+      if (!state.ok || state.type !== 'getState') throw new Error('test: expected a getState response');
+      // An older background predates §3.3 entirely, so its reply has no `build` — which is exactly the
+      // case the handshake exists for. The cast is the wire's own honesty: `Response` says `build:
+      // string`, and an older build's message does not.
+      const { build: _dropped, ...withoutBuild } = state;
+      const send = makeFakeSend((req) => (req.type === 'getState' ? (withoutBuild as Response) : { ok: true, type: 'setSettings' }));
+
+      await initPopup(doc, { send: asSend(send) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').disabled).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').disabled).toBe(true);
+      expect(el(doc, 'read-status').textContent).toBe(STALE_POPUP_STATUS);
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
     it('leaves both read buttons alone when the builds match', async () => {
       withTabs([{ id: 7, url: 'https://example.test/paper.pdf' }]);
       const doc = loadDoc();

@@ -298,8 +298,11 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   /** §3.3's whole handshake. Only ever SETS — a reload is the only cure, so nothing clears it — and it
    * touches nothing but the two read buttons and their status line, so the rest of the popup (settings,
    * keys, sites, stats) stays usable while the user goes and reloads. A failed `getState` never calls
-   * this: nothing was learned, and the existing `loadFailed` path already says so. */
-  function applyBuild(build: string): void {
+   * this: nothing was learned, and the existing `loadFailed` path already says so. A reply with no
+   * `build` at all — a background old enough to predate §3.3, which is the very thing this guards
+   * against — arrives here as `undefined` and counts as a mismatch, hence the wider parameter type than
+   * the `Response` field's. */
+  function applyBuild(build: string | undefined): void {
     if (build === BUILD_ID) return;
     readPageBtn.disabled = true;
     readPdfBtn.disabled = true;

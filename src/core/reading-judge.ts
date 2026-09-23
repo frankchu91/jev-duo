@@ -112,8 +112,12 @@ export class ReadingJudge {
           // next to "M passages", and every one of these passages did go unjudged.
           errors += at.length;
           // §3.1: the LAST failure wins. Ten passages failing the same way all carry the same message,
-          // and when they do not, the most recent one is the one the reader can still act on.
-          lastError = (err instanceof Error ? err.message : String(err)).slice(0, LAST_ERROR_MAX);
+          // and when they do not, the most recent one is the one the reader can still act on. A blank
+          // message — `new Error()`, or a provider that throws an Error it never gave words to — is
+          // stored as ABSENT rather than as an empty string: the panel then says `errors without a
+          // message`, which is honest, instead of `last error: ` with nothing after the colon.
+          const message = (err instanceof Error ? err.message : String(err)).trim();
+          lastError = message === '' ? undefined : message.slice(0, LAST_ERROR_MAX);
           fanOut(at, { id: passage.id, verdict: 'plain', p: 0.5, core: 0.5, error: true });
         } finally {
           release();

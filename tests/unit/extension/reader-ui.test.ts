@@ -203,6 +203,19 @@ describe('the panel says why it failed (§3.2)', () => {
     expect(errorLineOf(doc)).toBe('');
   });
 
+  // --- Review fix round 2, minor C: an Error with an empty message must not print `last error: ` ---
+
+  it('treats an empty or blank message as no message at all', () => {
+    const { doc, passages } = docWith(2);
+    mountReader(doc, { passages, focus: '', onClose: () => {} }).finish({ ms: 1000, usageTokens: 0, errors: 2, lastError: '' });
+
+    expect(errorLineOf(doc)).toBe('errors without a message');
+    // The judge stores `undefined` for these, but the reply crosses a message port from a background
+    // that may be an older build, so the panel refuses them on its own too.
+    expect(lastErrorLine('')).toBe('errors without a message');
+    expect(lastErrorLine('   ')).toBe('errors without a message');
+  });
+
   it('lastErrorLine is the whole decision, and is pure', () => {
     expect(lastErrorLine(undefined)).toBe('errors without a message');
     expect(lastErrorLine('HTTP 502')).toBe('last error: HTTP 502');

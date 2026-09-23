@@ -261,4 +261,21 @@ describe('ReadingJudge', () => {
     expect(run.errors).toBe(0);
     expect(run.lastError).toBeUndefined();
   });
+
+  // --- Review fix round 2, minor C: `last error: ` with nothing after it explains even less than
+  // `errors without a message`, which is what an absent lastError prints. ---
+
+  it('leaves lastError absent when the failure carried an empty message', async () => {
+    const jev: JevProvider = {
+      name: 'mute',
+      async evaluate(): Promise<JevResponse> {
+        throw new Error('   '); // `new Error()` and a whitespace-only message both come to the same thing
+      },
+    };
+
+    const run = await new ReadingJudge(jev).judge(CTX, '', passages('a passage whose call fails silently'));
+
+    expect(run.errors).toBe(1);
+    expect(run.lastError).toBeUndefined();
+  });
 });

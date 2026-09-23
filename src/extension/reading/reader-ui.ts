@@ -54,9 +54,12 @@ footer { display: flex; gap: 8px; padding: 6px 10px; border-top: 1px solid #dcdc
 export const STALE_BACKGROUND_HINT = 'the extension was updated — reload it at chrome://extensions (↻) and read again';
 
 /** §3.2's whole decision, as one pure function: the reason when there is one, the hint when the reason
- * is the stale-worker one, and an admission when the failures carried no message. */
+ * is the stale-worker one, and an admission when the failures carried no message — which a blank
+ * message is too. `ReadingJudge` already stores those as absent, but this summary crosses a message
+ * port from a background that may be an older build, so the line refuses an empty one on its own
+ * rather than printing `last error: ` with nothing after the colon. */
 export function lastErrorLine(lastError: string | undefined): string {
-  if (lastError === undefined) return 'errors without a message';
+  if (lastError === undefined || lastError.trim() === '') return 'errors without a message';
   if (lastError.startsWith('unknown request type')) return STALE_BACKGROUND_HINT;
   return `last error: ${lastError}`;
 }

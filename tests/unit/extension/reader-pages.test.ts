@@ -133,6 +133,19 @@ describe('render', () => {
     expect(sections[1].blocks).toHaveLength(1);
   });
 
+  // --- Review fix round 2, minor E: end to end through `render`, not just `displaySize` ---
+
+  it('reserves the DISPLAYED proportions for a page with a 90° /Rotate', () => {
+    const container = document.createElement('main');
+    const rotated: PageText = { page: 1, width: 612, height: 792, originX: 0, originY: 0, rotation: 90, items: [] };
+    const doc: PdfDoc = { title: 'Landscape', blocks: [{ kind: 'passage', text: 'A passage on a page turned on its side.', page: 1, box: BODY }] };
+
+    render(doc, [rotated], container);
+
+    // pdf.js draws the page turned, so the section is as wide as the page is tall.
+    expect(container.querySelector<HTMLElement>('section.jd-page')?.style.aspectRatio).toBe('792 / 612');
+  });
+
   it('clears the container first, so a re-read does not stack two documents', () => {
     const container = document.createElement('main');
     container.textContent = 'stale content from a previous read';
