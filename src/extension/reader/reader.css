@@ -1,7 +1,10 @@
 /*
- * The PDF reader page. One readable column of extracted text — this is not a PDF viewer and never
- * renders a page image: the point is passages the reader can judge, highlight and dim. The
- * highlight/dim classes themselves come from reading/reader-ui.ts's READER_CSS at runtime.
+ * The PDF reader page (design addendum §5.3). One column of RENDERED pages: a `.jd-page` section per
+ * page of the document, holding the canvas pdf.js draws that page on and one absolutely-positioned
+ * `.jd-block` overlay per passage, sitting over the pixels the passage was extracted from. Those
+ * overlays are what gets highlighted, dimmed and flashed, so the highlight/dim classes themselves still
+ * come from reading/reader-ui.ts's READER_CSS at runtime; the rules below place them, veil them on a
+ * page that is a picture rather than text, and cover the fallback for a page that fails to render.
  */
 
 :root {

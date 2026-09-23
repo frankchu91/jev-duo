@@ -180,7 +180,11 @@ loading task; the reader calls it before opening the next document.
   the reader passes `standardFontDataUrl: chrome.runtime.getURL('standard_fonts/')`,
   `cMapUrl: chrome.runtime.getURL('cmaps/')`, `cMapPacked: true`, `wasmUrl: chrome.runtime.getURL('wasm/')`,
   so the standard 14 fonts render, CJK-encoded text extracts, and JPX/JBIG2 images decode. A missing
-  folder fails the build with a one-line message, like the worker.
+  folder fails the build with a one-line message, like the worker. Manifest V3's default content
+  security policy has no `wasm-unsafe-eval`, so pdf.js cannot instantiate the `.wasm` decoders and uses
+  the JavaScript fallbacks shipped in the same `wasm/` folder (`jbig2_nowasm_fallback.js`,
+  `openjpeg_nowasm_fallback.js`) — JBIG2/JPX images still decode, only slower; ICC (qcms) has no
+  fallback and colour profiles are a non-goal (§8), and the manifest is left unchanged.
 
 ## 6. Tests
 

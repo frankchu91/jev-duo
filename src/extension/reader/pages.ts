@@ -255,8 +255,14 @@ export function mountPageRenderer(deps: PageRendererDeps): PageRenderer {
     // visibility changes, but a page re-queued by a resize — `onResized` below — never goes through
     // that path at all). Checked again here, right before spending a raster on it.
     if (visible.size > 0 && distanceFromVisible(page) > RELEASE_PAGE_DISTANCE) return;
-    inFlight.add(page);
+    // A section that measures 0 px has no layout yet — a tab that was in the background while the
+    // document was built is the common case. Rendering it would ask pdf.js for a scale of 0 and then
+    // record an empty canvas as drawn, with nothing left to ever notice and fix it. Nothing is
+    // recorded instead, so the page stays re-queueable and the next visibility change or resize draws
+    // it at a real width.
     const cssWidth = entry.section.clientWidth;
+    if (cssWidth <= 0) return;
+    inFlight.add(page);
     let staleWidth = false;
     try {
       await renderPage(page, entry.canvas, cssWidth, pixelRatio());

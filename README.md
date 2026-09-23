@@ -149,7 +149,12 @@ that one origin. **Open a PDF from your computer** reads a local file instead, w
 the network at all. For an arXiv PDF the reader points at the HTML version of the same paper, which
 has real paragraphs and reads better. Pages are rendered as you reach them and released again once
 you are well past them, so a long PDF does not sit in memory all at once; if a page cannot be
-rendered, its passages are shown as text in place so they stay readable and judgeable.
+rendered, its passages are shown as text in place so they stay readable and judgeable. A scanned PDF
+is rendered and scrollable like any other — there is simply nothing in it to judge, and the status
+line says so. Chrome's default extension content security policy allows no WebAssembly, so pdf.js
+decodes JBIG2 and JPX images with the JavaScript fallbacks it ships beside its `.wasm` decoders —
+those images still appear, only more slowly — and ICC colour profiles, which have no fallback, are not
+applied.
 
 **What is sent.** Per passage: the passage text (capped at 1500 characters), the document title
 (capped at 200 characters) and its lead (capped at 600). Nothing else — no URL, no page, no
@@ -314,13 +319,15 @@ Five things that make its job easier:
   recycles a handful of DOM nodes as you scroll) a node that has been reused for a different post can
   keep the fold it was given until the page reloads, since the decision is mounted on the element
   rather than on the post.
-- **Reading mode does not do everything.** No scanned PDFs (a page with no text layer needs OCR,
-  which jev-duo does not do — the reader says so rather than showing an empty document), no `file://`
-  URLs (use **Open a PDF from your computer**), no reading on page load, no figures, math or tables
-  (a table is flattened into one run of text before it is judged, when it is not excluded outright),
-  no comment filtering, no DOCX or EPUB, and no Firefox. There is no text selection on a rendered PDF
-  page: the page is a picture with passage overlays on it, not a text layer. The strictness slider
-  does not apply to reading: it uses fixed thresholds.
+- **Reading mode does not do everything.** No scanned PDFs (a page with no text layer needs OCR, which
+  jev-duo does not do — the reader renders those pages and says so rather than showing an empty
+  document), no `file://` URLs (use **Open a PDF from your computer**), no reading on page load, no
+  figures, math or tables (a table is flattened into one run of text before it is judged, when it is
+  not excluded outright), no comment filtering, no DOCX or EPUB, and no Firefox. There is no text
+  selection on a rendered PDF page: the page is a picture with passage overlays on it, not a text
+  layer. The strictness slider does not apply to reading: it uses fixed thresholds.
+- **A long PDF pauses before it appears.** The reader extracts the text of every page before it paints
+  the first one, so a very long document shows its status line for a moment before the pages show up.
 - **A page with `/Rotate` renders upright but is not read.** pdf.js draws it the right way up, but its
   text is itself rotated in the page's own coordinate space, so those items are dropped during
   extraction — the page displays correctly but yields no passages and gets no highlights.

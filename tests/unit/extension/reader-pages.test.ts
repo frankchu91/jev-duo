@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Box, PageText, PdfDoc } from '../../../src/extension/reading/pdf-text';
-import { mountPageRenderer, render, type ObserveFactory, type RenderPageFn, type ResizeFactory } from '../../../src/extension/reader/pages';
+import { mountPageRenderer, render, type ObserveFactory, type PageSection, type RenderPageFn, type ResizeFactory } from '../../../src/extension/reader/pages';
 
 const letter = (n: number): PageText => ({ page: n, width: 612, height: 792, originX: 0, originY: 0, rotation: 0, items: [] });
 
@@ -77,6 +77,13 @@ const noResize: ResizeFactory = () => ({ disconnect: () => {} });
 /** jsdom gives every element a clientWidth of 0; the resize case needs real numbers. */
 const setWidth = (el: HTMLElement, px: number): void => {
   Object.defineProperty(el, 'clientWidth', { value: px, configurable: true });
+};
+
+/** Every section a real width, because `draw` refuses to rasterise one it measures at 0 px — which in
+ * jsdom is every section that has not been given one here, and in a browser is a tab that was still
+ * being laid out when the observer fired. */
+const setWidths = (sections: PageSection[], px = 800): void => {
+  for (const s of sections) setWidth(s.section, px);
 };
 
 describe('render', () => {
@@ -162,6 +169,7 @@ describe('mountPageRenderer', () => {
     const container = document.createElement('main');
     const { doc, pages } = bigDoc(pageCount);
     const { sections } = render(doc, pages, container);
+    setWidths(sections);
     const observer = fakeObserver();
     const renderer = fakeRenderer();
     const handle = mountPageRenderer({
@@ -272,6 +280,7 @@ describe('mountPageRenderer', () => {
   it("a page whose render rejects shows its passages' text instead, and only that page", async () => {
     const container = document.createElement('main');
     const { sections } = render(DOC, PAGES, container);
+    setWidths(sections);
     const observer = fakeObserver();
     const renderer = fakeRenderer();
     mountPageRenderer({ sections, renderPage: renderer.renderPage, observe: observer.factory, onResize: noResize, pixelRatio: () => 2 });
@@ -291,6 +300,7 @@ describe('mountPageRenderer', () => {
   it('keeps a highlight tag the panel had already put on an overlay when the page fails', async () => {
     const container = document.createElement('main');
     const { sections } = render(DOC, PAGES, container);
+    setWidths(sections);
     const tag = document.createElement('span');
     tag.className = 'jd-rtag';
     tag.textContent = 'method · 95%';
@@ -384,7 +394,7 @@ describe('mountPageRenderer', () => {
     const container = document.createElement('main');
     const { doc, pages } = bigDoc(60);
     const { sections } = render(doc, pages, container);
-    setWidth(sections[0].section, 800);
+    setWidths(sections);
     const observer = fakeObserver();
     const renderer = fakeRenderer();
     let fireResize = (): void => {};
@@ -424,6 +434,7 @@ describe('mountPageRenderer', () => {
   it('a later successful draw clears a previous render failure', async () => {
     const container = document.createElement('main');
     const { sections } = render(DOC, PAGES, container);
+    setWidths(sections);
     const observer = fakeObserver();
     const renderer = fakeRenderer();
     mountPageRenderer({ sections, renderPage: renderer.renderPage, observe: observer.factory, onResize: noResize, pixelRatio: () => 2 });
@@ -448,6 +459,7 @@ describe('mountPageRenderer', () => {
   it('clearing a render failure preserves a highlight tag already on the overlay', async () => {
     const container = document.createElement('main');
     const { sections } = render(DOC, PAGES, container);
+    setWidths(sections);
     const tag = document.createElement('span');
     tag.className = 'jd-rtag';
     tag.textContent = 'method · 95%';
@@ -497,5 +509,32 @@ describe('mountPageRenderer', () => {
 
     expect(handle.rendered()).toEqual([1]);
     expect(renderer.calls).toEqual([1, 1]); // the second render wasn't itself resized again, so it sticks
+  });
+
+  // --- Review fix round 2, minor H: a section with no layout yet is not a page to rasterise ---
+
+  it('refuses to draw a section it measures at 0 px, and draws it once it has a width', async () => {
+    const container = document.createElement('main');
+    const { sections } = render(DOC, PAGES, container);
+    // No width at all — a tab still being laid out when the observer fired (and jsdom's default).
+    const observer = fakeObserver();
+    const renderer = fakeRenderer();
+    const handle = mountPageRenderer({ sections, renderPage: renderer.renderPage, observe: observer.factory, onResize: noResize, pixelRatio: () => 2 });
+
+    observer.enter(1);
+    await flush();
+
+    expect(renderer.calls).toEqual([]); // nothing rasterised at a scale of zero
+    expect(handle.rendered()).toEqual([]); // and nothing recorded as drawn, so the page stays re-queueable
+
+    // Laid out at last: the next time it is reported visible it is drawn, at its real width.
+    setWidth(sections[0].section, 800);
+    observer.leave(1);
+    observer.enter(1);
+    renderer.pending[0].resolve();
+    await flush();
+
+    expect(renderer.calls).toEqual([1]);
+    expect(handle.rendered()).toEqual([1]);
   });
 });
