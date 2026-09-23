@@ -101,9 +101,28 @@ export function toPercentBox(box: Box, page: { width: number; height: number; or
 - A line's box: `{ x: line.x, y: line.y − 0.25 × line.size, width: line.right − line.x, height: 1.25 × line.size }`
   (baseline `y`; a quarter em of descent below it, one em of ascent above).
 - A block's box is the union of its lines' boxes. Headings carry boxes too.
-- `toPercentBox`: `left = (box.x − originX) / width × 100`, `top = (originY + height − (box.y + box.height)) / height × 100`,
-  `width = box.width / width × 100`, `height = box.height / height × 100`; each clamped to [0, 100]
-  and formatted `${v.toFixed(3)}%`.
+- **Rotation.** `PageText` also carries `rotation: 0 | 90 | 180 | 270` (the page's `/Rotate`,
+  normalised as `((page.rotate % 360) + 360) % 360`; 0 for synthetic pages). pdf.js renders a page
+  with its rotation applied, and text items stay in the unrotated user space, so the projection
+  from a box to the displayed page depends on it. With `x0 = originX`, `y0 = originY`,
+  `x1 = x0 + width`, `y1 = y0 + height` and the box `(x, y, w, h)`, the displayed fractions are
+  (this is pdf.js's own `PageViewport` transform, written out):
+
+  | rotation | left | top | width | height |
+  |---|---|---|---|---|
+  | 0 | `(x − x0) / width` | `(y1 − (y + h)) / height` | `w / width` | `h / height` |
+  | 90 | `(y − y0) / height` | `(x − x0) / width` | `h / height` | `w / width` |
+  | 180 | `(x1 − (x + w)) / width` | `(y − y0) / height` | `w / width` | `h / height` |
+  | 270 | `(y1 − (y + h)) / height` | `(x1 − (x + w)) / width` | `h / height` | `w / width` |
+
+  `displaySize(page)` returns `{ width, height }` swapped for 90 and 270; the section's
+  `aspect-ratio` and `renderPage`'s scale both use the displayed size (pdf.js's
+  `getViewport({ scale: 1 })` already reports it). A non-finite fraction projects to 0.
+- `toPercentBox(box, page)`: each fraction from the table × 100, clamped to [0, 100] and formatted
+  `${v.toFixed(3)}%`.
+- Known limitation, documented: on a rotated page the upright text is itself rotated in user space,
+  so its items are dropped as `rotated` and the page is rendered but yields no passages. The mapping
+  above keeps any unrotated items on such a page correctly placed.
 
 ### 5.2 Loading (`src/extension/reading/pdf-load.ts`)
 
