@@ -151,8 +151,9 @@ Per page, then joined in page order:
    max `x + width`; `line.y` = the first item's `y`.
 3. **Body size** = the size (rounded to 0.5 pt) with the most characters across the whole document.
 4. **Running headers/footers**: a line whose normalized text (lowercased, every digit replaced by
-   `#`) appears on ≥ 3 pages — or on ≥ half the pages when the document has fewer than 6 — within
-   3 pt of the same `y` is dropped on every page. A line of ≤ 4 chars made only of digits or roman
+   `#`) appears on at least `pages >= 6 ? 3 : max(2, ceil(pages / 2))` pages within 3 pt of the
+   same `y` is dropped on every page (a one-page document therefore never has one: a single page
+   cannot show a repetition). A line of ≤ 4 chars made only of digits or roman
    numerals is dropped (page numbers).
 5. **Columns**: a line is `full` when `right − x ≥ 0.6 × page.width`, else `left` when `x <
    page.width / 2`, else `right`. Walk lines top→bottom (descending `y`); consecutive lines of the
@@ -325,8 +326,9 @@ Unit (vitest):
 
 - `reading.ts`: `readingQuestions` with and without focus (ids, order, options); `decideReading`
   table — (core .9, no focus) highlight; (core .7) highlight; (core .69) plain; (core .3) dim;
-  (core .31) plain; (focus .6, core .2) highlight; (focus .59, core .2) dim; (focus .59, core .5)
-  plain; missing `core` → 0.5 plain; `kind` copied; `readingState` truncates at 1500.
+  (core .31) plain; (focus .6, core .2) highlight; (focus .59, core .2) plain (the focus guard
+  blocks the dim); (focus .2, core .2) dim; (focus .59, core .5) plain; missing `core` → 0.5 plain;
+  `kind` copied; `readingState` truncates at 1500.
 - `reading-judge.ts` (mock provider + stubs): cache hit makes no second call; at most 6 in flight;
   timeout → `plain` with `error` and `errors: 1`; verdict order = passage order; `onVerdict` per
   passage; `usageTokens` summed.
