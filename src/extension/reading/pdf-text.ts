@@ -31,6 +31,11 @@ export interface PageText {
    * reason `toPercentBox` subtracts rather than divides straight away. */
   originX: number;
   originY: number;
+  /** The page's `/Rotate`, normalised to one turn: `((page.rotate % 360) + 360) % 360`. 0 for a
+   * synthetic page. pdf.js renders a page with this applied, but text items — and so `width`/`height`/
+   * `originX`/`originY` above — stay in the page's UNROTATED user space, which is why projecting a box
+   * onto the displayed page has to know the turn (`toPercentBox`, `displaySize`). */
+  rotation: 0 | 90 | 180 | 270;
   items: TextItem[];
 }
 
@@ -305,23 +310,66 @@ export function pagesToBlocks(pages: PageText[], fallbackTitle: string): PdfDoc 
   return { title, blocks };
 }
 
-const clampPercent = (v: number): number => (v < 0 ? 0 : v > 100 ? 100 : v);
+// A non-finite fraction (a degenerate zero-size page, a NaN box) projects to 0 rather than surfacing
+// as the CSS value "NaN%", which the browser would silently ignore and leave the overlay wherever it
+// last was.
+const clampPercent = (v: number): number => (Number.isFinite(v) ? (v < 0 ? 0 : v > 100 ? 100 : v) : 0);
 const percent = (v: number): string => `${clampPercent(v).toFixed(3)}%`;
 
-/** §5.1. PDF user space to the CSS percentages an overlay is positioned by: subtract the page origin,
- * flip the y axis (PDF counts up from the bottom, CSS down from the top), scale to the page, clamp.
+/** A page's own `width`/`height` (§5.1) are always the UNROTATED PDF box; this is what the *displayed*
+ * page — and so the `<section>` pdf.js draws into — actually measures. Swapped for a quarter or
+ * three-quarter turn, unchanged for a half turn or no turn at all. */
+export function displaySize(page: { width: number; height: number; rotation: 0 | 90 | 180 | 270 }): { width: number; height: number } {
+  return page.rotation === 90 || page.rotation === 270 ? { width: page.height, height: page.width } : { width: page.width, height: page.height };
+}
+
+/** §5.1, amended for rotation. PDF user space to the CSS percentages an overlay is positioned by.
+ * pdf.js renders a page with its `/Rotate` applied, but text items — and so every `Box` built from
+ * them — stay in the unrotated user space, so which edge of the *displayed* page a box's `x`/`y`
+ * project onto depends on the turn. This is pdf.js's own `PageViewport` transform, written out per
+ * quarter turn: with `x0 = originX`, `y0 = originY`, `x1 = x0 + width`, `y1 = y0 + height`, each
+ * fraction below is scaled to a percentage, clamped to [0, 100] and formatted `${v.toFixed(3)}%`.
  *
  * Percentages, not pixels, is the whole trick: the overlays stay correct at any rendered canvas size,
  * so a window resize costs nothing to recompute and a canvas re-rendered at a new width needs no
  * second pass over the geometry. */
 export function toPercentBox(
   box: Box,
-  page: { width: number; height: number; originX: number; originY: number },
+  page: { width: number; height: number; originX: number; originY: number; rotation: 0 | 90 | 180 | 270 },
 ): { left: string; top: string; width: string; height: string } {
-  return {
-    left: percent(((box.x - page.originX) / page.width) * 100),
-    top: percent(((page.originY + page.height - (box.y + box.height)) / page.height) * 100),
-    width: percent((box.width / page.width) * 100),
-    height: percent((box.height / page.height) * 100),
-  };
+  const { x, y, width: w, height: h } = box;
+  const { width, height, originX: x0, originY: y0 } = page;
+  const x1 = x0 + width;
+  const y1 = y0 + height;
+
+  switch (page.rotation) {
+    case 90:
+      return {
+        left: percent(((y - y0) / height) * 100),
+        top: percent(((x - x0) / width) * 100),
+        width: percent((h / height) * 100),
+        height: percent((w / width) * 100),
+      };
+    case 180:
+      return {
+        left: percent(((x1 - (x + w)) / width) * 100),
+        top: percent(((y - y0) / height) * 100),
+        width: percent((w / width) * 100),
+        height: percent((h / height) * 100),
+      };
+    case 270:
+      return {
+        left: percent(((y1 - (y + h)) / height) * 100),
+        top: percent(((x1 - (x + w)) / width) * 100),
+        width: percent((h / height) * 100),
+        height: percent((w / width) * 100),
+      };
+    default:
+      return {
+        left: percent(((x - x0) / width) * 100),
+        top: percent(((y1 - (y + h)) / height) * 100),
+        width: percent((w / width) * 100),
+        height: percent((h / height) * 100),
+      };
+  }
 }

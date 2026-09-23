@@ -82,23 +82,34 @@ describe('loadPages on tests/e2e/fixtures/sample.pdf', () => {
 
 // --- Design addendum 2026-09-23 §5.2: the page as PIXELS, against a pdf.js that is not pdf.js ---
 
-/** A one-page pdf.js stand-in. `getViewport({ scale })` scales a letter page; `render` records the
- * `{ canvas, viewport }` it was handed (pdf.js 6 takes the canvas itself, not a 2d context) and
- * resolves — or rejects — with whatever `onRender` does. */
-function fakePdfjs(onRender: () => Promise<void> = () => Promise.resolve()): {
+/** A one-page pdf.js stand-in. `getViewport({ scale })` scales a letter page — swapped for a 90°/270°
+ * `rotate`, the same as real pdf.js does — and `render` records the `{ canvas, viewport }` it was
+ * handed (pdf.js 6 takes the canvas itself, not a 2d context) and resolves — or rejects — with whatever
+ * `onRender` does. Once the task's `destroy` has been called, `getPage` starts rejecting, the same as a
+ * real document with its worker torn down — which is what lets a test assert that `renderPage` after
+ * `destroy()` rejects instead of hanging. */
+function fakePdfjs(
+  onRender: () => Promise<void> = () => Promise.resolve(),
+  rotate = 0,
+): {
   pdfjs: PdfjsLike;
   calls: Array<{ canvas: HTMLCanvasElement; viewport: { width: number; height: number } }>;
   params: Array<Record<string, unknown>>;
+  destroys: unknown[];
 } {
   const calls: Array<{ canvas: HTMLCanvasElement; viewport: { width: number; height: number } }> = [];
   const params: Array<Record<string, unknown>> = [];
+  const destroys: unknown[] = [];
+  const swapped = rotate === 90 || rotate === 270;
+  let destroyed = false;
   const page: PdfPageLike = {
     view: [0, 0, 612, 792],
+    rotate,
     async getTextContent() {
       return { items: [] };
     },
     getViewport({ scale }) {
-      return { width: 612 * scale, height: 792 * scale };
+      return swapped ? { width: 792 * scale, height: 612 * scale } : { width: 612 * scale, height: 792 * scale };
     },
     render(args) {
       calls.push(args);
@@ -109,12 +120,22 @@ function fakePdfjs(onRender: () => Promise<void> = () => Promise.resolve()): {
     getDocument(p) {
       params.push(p);
       return {
-        promise: Promise.resolve({ numPages: 1, getPage: async () => page, getMetadata: async () => ({}) }),
-        destroy: async () => {},
+        promise: Promise.resolve({
+          numPages: 1,
+          async getPage() {
+            if (destroyed) throw new Error('document is destroyed');
+            return page;
+          },
+          getMetadata: async () => ({}),
+        }),
+        async destroy() {
+          destroyed = true;
+          destroys.push(undefined);
+        },
       };
     },
   };
-  return { pdfjs, calls, params };
+  return { pdfjs, calls, params, destroys };
 }
 
 /** This file runs under the node environment (no DOM at all), and `renderPage` only ever writes
@@ -163,6 +184,48 @@ describe('openPdf renderPage', () => {
       cMapPacked: true,
       wasmUrl: 'chrome-extension://x/wasm/',
     });
+  });
+});
+
+// --- Design addendum 2026-09-23 §5.1 amendment: rotated pages, review fix round 1 ---
+
+describe('openPdf rotation', () => {
+  it('reports PageText.rotation and renders at the already-swapped viewport size', async () => {
+    const { pdfjs } = fakePdfjs(undefined, 90);
+    const opened = await openPdf(new ArrayBuffer(8), pdfjs);
+
+    expect(opened.pages[0].rotation).toBe(90);
+
+    const canvas = fakeCanvas();
+    // The fake's getViewport({ scale: 1 }) for a 90° page is already { width: 792, height: 612 } —
+    // the same swap real pdf.js performs — so cssWidth is matched against the SWAPPED base width.
+    await opened.renderPage(1, canvas, 792, 2);
+
+    // scale = cssWidth / base.width x pixelRatio = 792 / 792 x 2 = 2; the SWAPPED base (792 x 612)
+    // scaled by 2 is exactly 1584 x 1224 — the turned page, not the raw 612 x 792 MediaBox.
+    expect(canvas.width).toBe(1584);
+    expect(canvas.height).toBe(1224);
+  });
+});
+
+describe('openPdf destroy', () => {
+  it('is idempotent: destroying twice destroys the underlying task once and never throws', async () => {
+    const { pdfjs, destroys } = fakePdfjs();
+    const opened = await openPdf(new ArrayBuffer(8), pdfjs);
+
+    await opened.destroy();
+    await opened.destroy();
+
+    expect(destroys).toHaveLength(1);
+  });
+
+  it('renderPage after destroy rejects rather than hanging', async () => {
+    const { pdfjs } = fakePdfjs();
+    const opened = await openPdf(new ArrayBuffer(8), pdfjs);
+
+    await opened.destroy();
+
+    await expect(opened.renderPage(1, fakeCanvas(), 800, 2)).rejects.toThrow('document is destroyed');
   });
 });
 

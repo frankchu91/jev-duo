@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pagesToBlocks, toPercentBox, type Box, type PageText, type TextItem } from '../../../src/extension/reading/pdf-text';
+import { displaySize, pagesToBlocks, toPercentBox, type Box, type PageText, type TextItem } from '../../../src/extension/reading/pdf-text';
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
@@ -12,7 +12,7 @@ function item(str: string, x: number, y: number, size = 10, opts: { width?: numb
 /** A page of `items`. `origin` is `page.view[0]`/`[1]` — 0 for anything synthetic, non-zero only for a
  * cropped page, which the last toPercentBox case below covers directly. */
 function page(n: number, items: TextItem[], origin: { x: number; y: number } = { x: 0, y: 0 }): PageText {
-  return { page: n, width: PAGE_WIDTH, height: PAGE_HEIGHT, originX: origin.x, originY: origin.y, items };
+  return { page: n, width: PAGE_WIDTH, height: PAGE_HEIGHT, originX: origin.x, originY: origin.y, rotation: 0, items };
 }
 
 const texts = (pages: PageText[], kind: 'heading' | 'passage'): string[] =>
@@ -265,7 +265,7 @@ describe('pagesToBlocks boxes', () => {
 });
 
 describe('toPercentBox', () => {
-  const LETTER = { width: 612, height: 792, originX: 0, originY: 0 };
+  const LETTER = { width: 612, height: 792, originX: 0, originY: 0, rotation: 0 as const };
 
   it('projects a box on a letter page whose origin is (0, 0)', () => {
     expect(toPercentBox({ x: 61.2, y: 396, width: 306, height: 79.2 }, LETTER)).toEqual({
@@ -278,7 +278,7 @@ describe('toPercentBox', () => {
 
   it("subtracts a cropped page's origin from both axes", () => {
     // The same box, shifted by the origin: the same place on the page.
-    expect(toPercentBox({ x: 71.2, y: 416, width: 306, height: 79.2 }, { width: 612, height: 792, originX: 10, originY: 20 })).toEqual({
+    expect(toPercentBox({ x: 71.2, y: 416, width: 306, height: 79.2 }, { width: 612, height: 792, originX: 10, originY: 20, rotation: 0 })).toEqual({
       left: '10.000%',
       top: '40.000%',
       width: '50.000%',
@@ -297,5 +297,53 @@ describe('toPercentBox', () => {
       width: '100.000%',
       height: '100.000%',
     });
+  });
+});
+
+// --- Design addendum 2026-09-23 §5.1 amendment: rotated pages, review fix round 1 ---
+
+describe('toPercentBox rotation', () => {
+  // Flush against the page's own top-left corner in PDF user space: x = 0 (the left edge), and
+  // y + height = page height (the top edge, since PDF y counts up from the bottom).
+  const PAGE = { width: 200, height: 100, originX: 0, originY: 0 };
+  const BOX: Box = { x: 0, y: 95, width: 20, height: 5 };
+
+  it('an unrotated page keeps a top-left box at the top-left', () => {
+    expect(toPercentBox(BOX, { ...PAGE, rotation: 0 })).toEqual({ left: '0.000%', top: '0.000%', width: '10.000%', height: '5.000%' });
+  });
+
+  it('a 90° page turns the same box to the top-right, with width/height swapped', () => {
+    expect(toPercentBox(BOX, { ...PAGE, rotation: 90 })).toEqual({ left: '95.000%', top: '0.000%', width: '5.000%', height: '10.000%' });
+  });
+
+  it('a 180° page turns the same box to the bottom-right', () => {
+    expect(toPercentBox(BOX, { ...PAGE, rotation: 180 })).toEqual({ left: '90.000%', top: '95.000%', width: '10.000%', height: '5.000%' });
+  });
+
+  it('a 270° page turns the same box to the bottom-left, with width/height swapped', () => {
+    expect(toPercentBox(BOX, { ...PAGE, rotation: 270 })).toEqual({ left: '0.000%', top: '90.000%', width: '5.000%', height: '10.000%' });
+  });
+
+  it('a box whose numbers are not finite projects to 0%, not the invalid CSS value "NaN%"', () => {
+    expect(toPercentBox({ x: NaN, y: NaN, width: NaN, height: NaN }, { ...PAGE, rotation: 0 })).toEqual({
+      left: '0.000%',
+      top: '0.000%',
+      width: '0.000%',
+      height: '0.000%',
+    });
+  });
+});
+
+describe('displaySize', () => {
+  const PAGE = { width: 612, height: 792 };
+
+  it('keeps width/height at 0° and 180°', () => {
+    expect(displaySize({ ...PAGE, rotation: 0 })).toEqual({ width: 612, height: 792 });
+    expect(displaySize({ ...PAGE, rotation: 180 })).toEqual({ width: 612, height: 792 });
+  });
+
+  it('swaps width/height at 90° and 270°', () => {
+    expect(displaySize({ ...PAGE, rotation: 90 })).toEqual({ width: 792, height: 612 });
+    expect(displaySize({ ...PAGE, rotation: 270 })).toEqual({ width: 792, height: 612 });
   });
 });

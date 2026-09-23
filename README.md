@@ -321,6 +321,9 @@ Five things that make its job easier:
   no comment filtering, no DOCX or EPUB, and no Firefox. There is no text selection on a rendered PDF
   page: the page is a picture with passage overlays on it, not a text layer. The strictness slider
   does not apply to reading: it uses fixed thresholds.
+- **A page with `/Rotate` renders upright but is not read.** pdf.js draws it the right way up, but its
+  text is itself rotated in the page's own coordinate space, so those items are dropped during
+  extraction — the page displays correctly but yields no passages and gets no highlights.
 - **English first.** The compiler prompt and the mock compiler both assume English intents.
 - **v1 uses Noul questions only.** Jev's Choice and Score primitives are implemented in the provider
   layer but no v1 feature needs them, so nothing sorts or scores your feed yet.

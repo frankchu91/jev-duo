@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 import type { Box, PageText, PdfDoc } from '../../../src/extension/reading/pdf-text';
 import { mountPageRenderer, render, type ObserveFactory, type RenderPageFn, type ResizeFactory } from '../../../src/extension/reader/pages';
 
-const letter = (n: number): PageText => ({ page: n, width: 612, height: 792, originX: 0, originY: 0, items: [] });
+const letter = (n: number): PageText => ({ page: n, width: 612, height: 792, originX: 0, originY: 0, rotation: 0, items: [] });
 
 /** The three-line body block from pdf-text.test.ts, so the percentages below are traceable. */
 const BODY: Box = { x: 72, y: 669.5, width: 235, height: 40.5 };

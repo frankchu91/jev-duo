@@ -22,6 +22,9 @@ export interface PdfRenderTaskLike {
 export interface PdfPageLike {
   /** [x0, y0, x1, y1] in PDF user space. */
   view: number[];
+  /** The page's `/Rotate`, in degrees — not necessarily normalised to one turn, or even non-negative;
+   * `openPdf` does that before it lands on `PageText.rotation`. */
+  rotate: number;
   getTextContent(): Promise<{ items: unknown[] }>;
   getViewport(params: { scale: number }): PdfViewportLike;
   /** pdf.js 6 takes the canvas itself, not a 2d context. */
@@ -91,6 +94,14 @@ function metaTitleOf(meta: unknown): string | undefined {
   return title === '' ? undefined : title;
 }
 
+/** §5.1's normalisation, to one of the four quarter turns `PageText.rotation` actually carries.
+ * Anything that is not exactly 90/180/270 after normalising — including 0, and any malformed value —
+ * falls back to 0, the same as a synthetic page. */
+function normalizeRotation(raw: number): PageText['rotation'] {
+  const normalized = ((raw % 360) + 360) % 360;
+  return normalized === 90 || normalized === 180 || normalized === 270 ? normalized : 0;
+}
+
 /** §5.2. Unlike `loadPages` this keeps the document OPEN — that is the whole difference, and the whole
  * point: a reader that draws the pages needs the same worker alive for as long as it is on screen.
  *
@@ -99,6 +110,7 @@ function metaTitleOf(meta: unknown): string | undefined {
 export async function openPdf(data: ArrayBuffer, pdfjs: PdfjsLike, assets: PdfAssets = {}): Promise<OpenedPdf> {
   const task = pdfjs.getDocument({ data: new Uint8Array(data), isEvalSupported: false, useSystemFonts: false, ...assets });
   const doc = await task.promise;
+  let destroyed = false;
 
   const pages: PageText[] = [];
   for (let n = 1; n <= doc.numPages; n++) {
@@ -111,6 +123,7 @@ export async function openPdf(data: ArrayBuffer, pdfjs: PdfjsLike, assets: PdfAs
       height: num(view[3]) - num(view[1]),
       originX: num(view[0]),
       originY: num(view[1]),
+      rotation: normalizeRotation(page.rotate),
       items: content.items.map(toTextItem).filter((i): i is TextItem => i !== undefined),
     });
   }
@@ -131,6 +144,11 @@ export async function openPdf(data: ArrayBuffer, pdfjs: PdfjsLike, assets: PdfAs
       await page.render({ canvas, viewport }).promise;
     },
     async destroy() {
+      // Idempotent: the reader calls this before opening every new document, and a caller racing a
+      // second call (or calling it defensively after one already in flight) should never see a throw
+      // or destroy the underlying task twice.
+      if (destroyed) return;
+      destroyed = true;
       await task.destroy?.();
     },
   };

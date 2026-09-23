@@ -10,7 +10,7 @@
 
 import { passageId } from '../../core/reading';
 import type { ArticlePassage } from '../reading/article';
-import { toPercentBox, type Block, type PageText, type PdfDoc } from '../reading/pdf-text';
+import { displaySize, toPercentBox, type Block, type PageText, type PdfDoc } from '../reading/pdf-text';
 
 /** A page and a half of viewport in each direction, so a canvas is normally drawn before it is seen. */
 export const OBSERVER_ROOT_MARGIN = '150% 0px';
@@ -63,10 +63,12 @@ export function render(doc: PdfDoc, pages: PageText[], container: HTMLElement): 
     const section = document.createElement('section');
     section.className = 'jd-page';
     section.dataset.page = String(pageText.page);
-    // The page's own proportions, so the section reserves the right space before anything is drawn:
-    // that is what keeps the overlays in place and the scroll position stable while canvases are
-    // drawn and released underneath them.
-    section.style.aspectRatio = `${pageText.width} / ${pageText.height}`;
+    // The page's own DISPLAYED proportions (width/height swapped for a 90°/270° /Rotate — pdf.js
+    // renders the page turned, even though pageText.width/height stay in its unrotated user space), so
+    // the section reserves the right space before anything is drawn: that is what keeps the overlays
+    // in place and the scroll position stable while canvases are drawn and released underneath them.
+    const { width: displayWidth, height: displayHeight } = displaySize(pageText);
+    section.style.aspectRatio = `${displayWidth} / ${displayHeight}`;
 
     const mark = document.createElement('div');
     mark.className = 'jd-page-mark';
