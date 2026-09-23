@@ -22,15 +22,16 @@ const MIN_ARTICLE_CHARS = 1500;
 const CONTAINER_SHARE = 0.8;
 
 /** Everything a passage may not sit inside (§5.1) — chrome, controls, captions and code, all of which
- * are real text a reader is not reading *as the document*. Asked once per candidate with `closest`. */
+ * are real text a reader is not reading *as the document*. Asked once per candidate with `closest`, and
+ * again per candidate `h1` in `contextOf` so a site header's own heading can't become the title. */
 const EXCLUDED_ANCESTORS =
   'nav, header, footer, aside, form, figure, figcaption, table, pre, code, [role="navigation"], [role="complementary"], [contenteditable]';
 
 /** Each qualifying paragraph with its collapsed text, memoised together so the text walk (the most
  * expensive thing this file does) happens once per paragraph rather than once per reader. */
-function candidatesWithText(doc: Document): Array<[Element, string]> {
+function candidatesWithText(body: Element): Array<[Element, string]> {
   const out: Array<[Element, string]> = [];
-  for (const p of doc.body.querySelectorAll('p')) {
+  for (const p of body.querySelectorAll('p')) {
     if (p.closest(EXCLUDED_ANCESTORS)) continue;
     const text = collapsedText(p);
     if (text.length >= MIN_PASSAGE_CHARS) out.push([p, text]);
@@ -39,24 +40,44 @@ function candidatesWithText(doc: Document): Array<[Element, string]> {
 }
 
 /** Every paragraph that could be a passage, container or not. §8.1's `no-article` result reports this
- * count, which is the difference between "this page is not an article" and "this page has no text". */
+ * count, which is the difference between "this page is not an article" and "this page has no text". A
+ * document with no `body` (an XML document, or a bare `new Document()`) has no candidates at all. */
 export function articleCandidates(doc: Document): Element[] {
-  return candidatesWithText(doc).map(([el]) => el);
+  return doc.body ? candidatesWithText(doc.body).map(([el]) => el) : [];
+}
+
+/** Bottom-up, one pass: each candidate's text length is added to every ancestor between it and `body`
+ * inclusive, so `containerOf`'s descent can read a node's mass with a single `Map.get` instead of
+ * re-summing every candidate at every node it visits. O(candidates × depth) to build rather than
+ * O(candidates × nodes visited) to query — the difference between milliseconds and seconds on a page
+ * with several thousand paragraphs. Every candidate is a descendant of `body` by construction
+ * (`candidatesWithText` only ever looks inside it), so stopping the walk at `body` is exhaustive. */
+function massOf(body: Element, candidates: Array<[Element, string]>): Map<Element, number> {
+  const mass = new Map<Element, number>();
+  for (const [el, text] of candidates) {
+    let node: Element | null = el;
+    while (node) {
+      mass.set(node, (mass.get(node) ?? 0) + text.length);
+      if (node === body) break;
+      node = node.parentElement;
+    }
+  }
+  return mass;
 }
 
 /** §5.2: start at `body` and keep descending while one child holds 80 % of the candidate text below
  * the current node. A blog whose comments hold a quarter of the text keeps the common parent — by
  * design: the reader is explicit, and comments are readable too. */
-function containerOf(doc: Document, candidates: Array<[Element, string]>): Element {
-  const mass = (node: Element): number => candidates.reduce((sum, [el, text]) => (node.contains(el) ? sum + text.length : sum), 0);
-  let node: Element = doc.body;
+function containerOf(body: Element, candidates: Array<[Element, string]>): Element {
+  const mass = massOf(body, candidates);
+  let node: Element = body;
   for (;;) {
-    const total = mass(node);
+    const total = mass.get(node) ?? 0;
     if (total === 0) return node;
     let best: Element | undefined;
     let bestMass = 0;
     for (const child of node.children) {
-      const m = mass(child);
+      const m = mass.get(child) ?? 0;
       if (m > bestMass) {
         best = child;
         bestMass = m;
@@ -68,9 +89,13 @@ function containerOf(doc: Document, candidates: Array<[Element, string]>): Eleme
 }
 
 /** §5.5. `source` reads the host window's location so a detached document (a DOMParser document in a
- * test) resolves to its own URL instead of whatever page happens to be global. */
+ * test) resolves to its own URL instead of whatever page happens to be global. The title comes from the
+ * first `h1` in the container that does not itself sit inside an excluded ancestor (§5.1's selector,
+ * reused): when the container stops the descent at `body` because comments or a sidebar hold too much
+ * of the mass, a site's own `<header><h1>` is in `body` too, and document order alone would let it win
+ * over the real heading just by coming first. */
 function contextOf(doc: Document, container: Element, lead: string): DocContext {
-  const h1 = container.querySelector('h1');
+  const h1 = [...container.querySelectorAll('h1')].find((el) => !el.closest(EXCLUDED_ANCESTORS));
   const heading = h1 ? collapsedText(h1) : '';
   const description = (doc.querySelector('meta[name="description"]')?.getAttribute('content') ?? '').replace(/\s+/g, ' ').trim();
   return {
@@ -81,12 +106,14 @@ function contextOf(doc: Document, container: Element, lead: string): DocContext 
 }
 
 /** The whole of §5. `undefined` means "this does not look like an article", which the caller shows as
- * a message rather than an empty reader — never a partial read. */
+ * a message rather than an empty reader — never a partial read. A document with no `body` (an XML
+ * document, or a bare `new Document()`) is treated the same as one with no candidates. */
 export function extractArticle(doc: Document): Article | undefined {
-  const candidates = candidatesWithText(doc);
+  if (!doc.body) return undefined;
+  const candidates = candidatesWithText(doc.body);
   if (candidates.length === 0) return undefined;
 
-  const container = containerOf(doc, candidates);
+  const container = containerOf(doc.body, candidates);
   const inside = candidates.filter(([el]) => container.contains(el)).slice(0, MAX_PASSAGES);
   if (inside.length < MIN_ARTICLE_PASSAGES) return undefined;
   if (inside.reduce((sum, [, text]) => sum + text.length, 0) < MIN_ARTICLE_CHARS) return undefined;

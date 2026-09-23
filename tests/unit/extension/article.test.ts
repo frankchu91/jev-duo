@@ -87,6 +87,20 @@ describe('extractArticle container descent', () => {
   });
 });
 
+// Fix round 1, IMPORTANT: `containerOf` used to re-sum every candidate's text at every node it visited
+// (O(candidates x nodes)), which is quadratic on a flat page — seconds on 5,000 paragraphs. The
+// bottom-up mass map makes this O(candidates x depth) to build and O(1) per node to query.
+describe('extractArticle performance', () => {
+  it('extracts 600 passages from 5,000 flat paragraphs in under 200ms', () => {
+    const doc = parse(paragraphs(5000, 60));
+    const start = performance.now();
+    const article = extractArticle(doc);
+    const elapsed = performance.now() - start;
+    expect(article?.passages).toHaveLength(600);
+    expect(elapsed).toBeLessThan(200);
+  });
+});
+
 describe('extractArticle rejections', () => {
   it('returns undefined for a docs page of four short paragraphs', () => {
     expect(extractArticle(parse(`
@@ -131,6 +145,31 @@ describe('extractArticle context and caps', () => {
     expect(article?.ctx.lead).toHaveLength(600);
   });
 
+  // Fix round 1, WARNING: `container.querySelector('h1')` took the first h1 in document order, so when
+  // comments keep the container at `body` (as above), a site header's own <h1> — also inside body — won
+  // over the article's real heading just by coming first. The fix looks for the first h1 that is not
+  // itself sitting inside an excluded ancestor (the same rule candidates use).
+  it("uses the article's own h1, not a site header's h1, when comments keep the container at body", () => {
+    const doc = parse(`
+      <header><h1>Site name</h1></header>
+      <article><h1>Post title</h1>${paragraphs(8, 140, 'post')}</article>
+      <section id="comments">${paragraphs(3, 140, 'comment')}</section>
+    `);
+    expect(extractArticle(doc)?.ctx.title).toBe('Post title');
+  });
+
+  it('falls back to document.title when the only h1 in the container sits inside a header', () => {
+    const doc = parse(
+      `
+        <header><h1>Site name</h1></header>
+        <article>${paragraphs(8, 140, 'post')}</article>
+        <section id="comments">${paragraphs(3, 140, 'comment')}</section>
+      `,
+      '<title>My Site</title>',
+    );
+    expect(extractArticle(doc)?.ctx.title).toBe('My Site');
+  });
+
   it('keeps the first 600 passages of a longer document', () => {
     const article = extractArticle(parse(paragraphs(700, 60)));
     expect(article?.passages).toHaveLength(600);
@@ -143,5 +182,24 @@ describe('articleCandidates', () => {
     expect(articleCandidates(loadDoc('article.html'))).toHaveLength(21);
     expect(articleCandidates(parse('<div id="root"></div>'))).toHaveLength(0);
     expect(articleCandidates(parse('<p>short</p><p>also short</p>'))).toHaveLength(0);
+  });
+});
+
+// Fix round 1, IMPORTANT: `doc.body.querySelectorAll` threw when `doc.body` is null — true at runtime
+// (though TS's lib.dom.d.ts types `Document.body` as non-nullable) for a bare `new Document()` and for
+// any document DOMParser parses as XML rather than HTML, neither of which gets an HTML <body>.
+describe('extractArticle and articleCandidates without a body', () => {
+  it('returns undefined / empty for a document with no body element', () => {
+    const doc = new Document();
+    expect(doc.body).toBeNull();
+    expect(extractArticle(doc)).toBeUndefined();
+    expect(articleCandidates(doc)).toEqual([]);
+  });
+
+  it('returns undefined / empty for an XML document parsed without an HTML body', () => {
+    const doc = new DOMParser().parseFromString('<root><child>text</child></root>', 'application/xml');
+    expect(doc.body).toBeNull();
+    expect(extractArticle(doc)).toBeUndefined();
+    expect(articleCandidates(doc)).toEqual([]);
   });
 });
