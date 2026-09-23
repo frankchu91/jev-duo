@@ -32,10 +32,18 @@ export async function runReading(deps: {
 
   handle.setProgress(0, passages.length);
   for (let i = 0; i < passages.length; i += size) {
+    // The reader can be closed (Close/×, or a popup toggle-off re-running read-page.ts) while a batch
+    // is still in flight — a 10 s per-passage timeout on the judge means "in flight" can last a while.
+    // Checked before every send, so a closed reader never issues another message...
+    if (handle.isDestroyed()) break;
     // Rebuilt field by field, which is also what strips an ArticlePassage's `el`: a DOM node cannot
     // be structured-cloned into a message, and the background has no use for one.
     const batch = passages.slice(i, i + size).map(({ id, index, text, page }) => ({ id, index, text, page }));
     const res = await deps.send({ type: 'readPassages', ctx, passages: batch });
+    // ...and again right after: a reply that lands after the close is discarded rather than applied —
+    // `apply`/`setFocus`/`setProgress` would no-op anyway (reader-ui.ts), but skipping here also stops
+    // this loop from ever reaching another `send`.
+    if (handle.isDestroyed()) break;
     if (res.ok && res.type === 'readPassages') {
       if (!focusShown) {
         handle.setFocus(res.focus);
@@ -54,6 +62,8 @@ export async function runReading(deps: {
   }
 
   const summary = { ms: now() - started, usageTokens, errors };
-  handle.finish(summary);
+  // A destroyed reader has nothing left to show a summary on; `finish` would no-op anyway, but the
+  // panel is gone either way, so there's no reason to touch it.
+  if (!handle.isDestroyed()) handle.finish(summary);
   return summary;
 }

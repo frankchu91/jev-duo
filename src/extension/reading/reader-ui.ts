@@ -18,8 +18,8 @@ export const READER_CSS = `
 .jd-dim:hover { opacity: 1 !important; }
 .jd-flash { animation: jd-flash 1.2s ease-out 1; }
 @keyframes jd-flash { from { outline: 2px solid #f2a900; outline-offset: 2px; } to { outline: 2px solid rgba(242,169,0,0); outline-offset: 2px; } }
-.jd-rtag { font: 11px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #6b6b73; background: #f0f0f3; border-radius: 4px; margin-left: 6px; padding: 1px 6px; white-space: nowrap; vertical-align: middle; }
-#jd-reader { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; }
+.jd-rtag { font: 11px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; color: #6b6b73 !important; background: #f0f0f3 !important; border-radius: 4px !important; margin-left: 6px !important; padding: 1px 6px !important; white-space: nowrap !important; vertical-align: middle !important; }
+#jd-reader { position: fixed !important; right: 16px; bottom: 16px; z-index: 2147483647 !important; }
 `;
 
 /** The panel's own sheet, inside its shadow root: not exported because nothing outside this file can
@@ -51,7 +51,11 @@ export interface ReaderHandle {
   setFocus(focus: string): void;
   setProgress(judged: number, total: number): void;
   finish(summary: { ms: number; usageTokens: number; errors: number }): void;
+  /** Idempotent: a second call is a no-op (no double `onClose`, nothing removed twice). */
   destroy(): void;
+  /** True once `destroy()` has run. `runReading` polls this to stop feeding a closed reader — see
+   * `apply`/`setFocus`/`setProgress`/`finish` below, which all no-op once this is true. */
+  isDestroyed(): boolean;
 }
 
 const STYLE_ID = 'jd-reader-style';
@@ -78,6 +82,11 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
   const dimmed: Element[] = [];
   const listedIndexes: number[] = [];
   let showingAll = false;
+  // Set once destroy() has run. A batch still in flight when the user closes the panel (Close/×, or a
+  // second injection toggling it off) must not keep decorating the page after its style sheet is gone
+  // — every mutating method below checks this first, and destroy() itself uses it to stay idempotent.
+  let destroyed = false;
+  const flashTimers = new Set<ReturnType<typeof setTimeout>>();
 
   const panel = host.createElement('div');
   panel.id = PANEL_ID;
@@ -129,7 +138,14 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
       // still flash the passage when it cannot scroll to it.
       passage.el.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
       passage.el.classList.add('jd-flash');
-      setTimeout(() => passage.el.classList.remove('jd-flash'), FLASH_MS);
+      // Tracked so destroy() can cancel it: a flash outliving the panel by up to FLASH_MS would strip
+      // `jd-flash` off whatever the SAME element ends up with next — a fresh flash from a second mount,
+      // if the user reopens the reader on the same document before the timer fires.
+      const timer = setTimeout(() => {
+        flashTimers.delete(timer);
+        passage.el.classList.remove('jd-flash');
+      }, FLASH_MS);
+      flashTimers.add(timer);
     });
 
     // Verdicts arrive in whatever order the calls resolved; the list is always document order.
@@ -144,6 +160,7 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
   }
 
   function apply(v: ReadingVerdict): void {
+    if (destroyed) return; // a verdict for a panel that is already gone: nothing left to decorate
     const passage = byId.get(v.id);
     if (!passage) return; // a verdict for a document that has already been replaced
     if (v.verdict === 'highlight') {
@@ -168,6 +185,10 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
   });
 
   function destroy(): void {
+    if (destroyed) return; // idempotent: a second Close click, or destroy() racing a second mountReader
+    destroyed = true;
+    for (const timer of flashTimers) clearTimeout(timer);
+    flashTimers.clear();
     for (const passage of opts.passages) passage.el.classList.remove('jd-hl', 'jd-dim', 'jd-flash');
     for (const tag of tags) tag.remove();
     panel.remove();
@@ -182,18 +203,22 @@ export function mountReader(host: Document, opts: { passages: ArticlePassage[]; 
   const handle: ReaderHandle = {
     apply,
     setFocus(focus: string): void {
+      if (destroyed) return;
       const trimmed = focus.trim();
       focusLine.textContent = trimmed === '' ? '' : `focus: ${trimmed}`;
     },
     setProgress(judged: number, total: number): void {
+      if (destroyed) return;
       progressLine.textContent = `${judged} of ${total} judged`;
     },
     finish(summary): void {
+      if (destroyed) return;
       const usd = ((summary.usageTokens * JEV_INPUT_USD_PER_MTOK) / 1e6).toFixed(4);
       const errors = summary.errors > 0 ? ` · ${summary.errors} errors` : '';
       progressLine.textContent = `${opts.passages.length} passages · ${(summary.ms / 1000).toFixed(1)} s · ~$${usd}${errors}`;
     },
     destroy,
+    isDestroyed: () => destroyed,
   };
 
   handle.setFocus(opts.focus);

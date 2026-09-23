@@ -198,6 +198,62 @@ describe('mountReader lifecycle', () => {
     expect(doc.querySelectorAll('#jd-reader')).toHaveLength(1);
     expect(doc.querySelectorAll('.jd-hl')).toHaveLength(0);
   });
+
+  // --- Fix round 1: a batch still in flight when the panel closes must not keep decorating the page ---
+
+  it('apply/setFocus/setProgress/finish are all no-ops once destroyed', () => {
+    const { doc, passages } = docWith(1);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    handle.destroy();
+
+    expect(handle.isDestroyed()).toBe(true);
+
+    handle.apply(verdict('rd:0', 'highlight', { kind: 'claim' }));
+    expect(passages[0].el.classList.contains('jd-hl')).toBe(false);
+    expect(passages[0].el.querySelector('.jd-rtag')).toBeNull();
+
+    // The panel itself is gone (destroy() already removed it); these must not throw reaching for it.
+    expect(() => handle.setFocus('anything')).not.toThrow();
+    expect(() => handle.setProgress(1, 1)).not.toThrow();
+    expect(() => handle.finish({ ms: 1, usageTokens: 1, errors: 0 })).not.toThrow();
+  });
+
+  it('destroy() is idempotent: a second call does not call onClose again', () => {
+    const { doc, passages } = docWith(1);
+    const onClose = vi.fn();
+    const handle = mountReader(doc, { passages, focus: '', onClose });
+
+    handle.destroy();
+    handle.destroy();
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(handle.isDestroyed()).toBe(true);
+  });
+
+  it('destroy() cancels a pending flash timer, so it cannot clip a later flash on the same element short', () => {
+    vi.useFakeTimers();
+    const { doc, passages } = docWith(1);
+    const first = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    first.apply(verdict('rd:0', 'highlight'));
+    panelOf(doc).querySelector('li')?.dispatchEvent(new MouseEvent('click')); // flash timer due at t=1200
+
+    first.destroy(); // must cancel that timer outright, not just remove the class it would later remove
+
+    vi.advanceTimersByTime(600); // t=600: halfway through the (cancelled) first timer's life
+
+    const second = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    second.apply(verdict('rd:0', 'highlight'));
+    panelOf(doc).querySelector('li')?.dispatchEvent(new MouseEvent('click')); // flash timer due at t=1800
+    expect(passages[0].el.classList.contains('jd-flash')).toBe(true);
+
+    vi.advanceTimersByTime(600); // t=1200: exactly when the FIRST timer would have fired, if not cancelled
+    expect(passages[0].el.classList.contains('jd-flash')).toBe(true); // still flashing: uninterrupted
+
+    vi.advanceTimersByTime(600); // t=1800: the second flash's own timer
+    expect(passages[0].el.classList.contains('jd-flash')).toBe(false);
+
+    vi.useRealTimers();
+  });
 });
 
 describe('runReading', () => {
@@ -270,5 +326,52 @@ describe('runReading', () => {
     await runReading({ handle, ctx, passages, send: spy.send, batchSize: 2 });
 
     expect(spy.calls.filter((c) => c.type === 'readPassages')).toHaveLength(3);
+  });
+
+  // --- Fix round 1: destroying the reader while a batch is in flight must stop the loop, not just the UI ---
+
+  it('a reply that arrives after the handle is destroyed applies nothing, sends no further batch, and skips finish', async () => {
+    const { doc, passages } = docWith(20); // 2 batches at the default size (12 + 8)
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    const finishSpy = vi.spyOn(handle, 'finish');
+    const calls: Request[] = [];
+    const fn = vi.fn(async (req: Request): Promise<Response> => {
+      calls.push(structuredClone(req));
+      if (req.type !== 'readPassages') return { ok: false, error: 'unhandled' };
+      // Simulates the user closing the reader while this very reply was still in flight: by the time
+      // runReading's `await` resumes, the panel is already gone.
+      if (calls.length === 1) handle.destroy();
+      return { ok: true, type: 'readPassages', focus: 'q', verdicts: req.passages.map((p) => verdict(p.id, 'highlight')), usageTokens: 10, errors: 0 };
+    });
+
+    await runReading({ handle, ctx, passages, send: fn as unknown as typeof send });
+
+    expect(fn).toHaveBeenCalledTimes(1); // no second batch was ever sent
+    expect(doc.querySelectorAll('.jd-hl')).toHaveLength(0); // the reply that arrived after destroy applied nothing
+    expect(finishSpy).not.toHaveBeenCalled();
+  });
+
+  it('applies a batch that lands before destruction, but discards one destroyed mid-flight and stops there', async () => {
+    const { doc, passages } = docWith(30); // 3 batches at size 12: 12, 12, 6
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    // A spy (not a DOM check): destroy() itself unconditionally strips every jd-hl/jd-dim it or any
+    // earlier batch added — restoring the page is the whole point — so the DOM alone can't tell
+    // "batch 2's verdicts were never applied" apart from "they were applied and then wiped along with
+    // batch 1's". Counting the calls can.
+    const applySpy = vi.spyOn(handle, 'apply');
+    const calls: Request[] = [];
+    const fn = vi.fn(async (req: Request): Promise<Response> => {
+      calls.push(structuredClone(req));
+      if (req.type !== 'readPassages') return { ok: false, error: 'unhandled' };
+      const res: Response = { ok: true, type: 'readPassages', focus: 'q', verdicts: req.passages.map((p) => verdict(p.id, 'highlight')), usageTokens: 10, errors: 0 };
+      if (calls.length === 2) handle.destroy(); // the SECOND reply is the one still in flight at close time
+      return res;
+    });
+
+    await runReading({ handle, ctx, passages, send: fn as unknown as typeof send, batchSize: 12 });
+
+    expect(fn).toHaveBeenCalledTimes(2); // the third batch (passages 24..29) was never sent
+    expect(applySpy).toHaveBeenCalledTimes(12); // only the first (undestroyed) batch's verdicts were applied
+    expect(doc.querySelectorAll('.jd-hl, .jd-dim, .jd-rtag')).toHaveLength(0); // destroy() restored the page
   });
 });
