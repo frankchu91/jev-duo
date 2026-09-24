@@ -148,8 +148,8 @@ If the page is not a document — a feed, an app shell, a docs page of four shor
 popup says `this page does not look like an article (N passages)` and nothing is touched. Reading
 needs at least 6 paragraphs and 1500 characters inside one container to call something an article.
 
-**On a PDF.** The popup swaps in **Read this PDF** when the tab looks like one (a `.pdf` path, or an
-arXiv `/pdf/` URL). It replaces Chrome's PDF viewer **in that same tab** with jev-duo's own reader,
+**On a PDF.** The popup swaps in **Read this PDF** when the tab looks like one (a `.pdf` path; an
+arXiv paper gets its own button — see below). It replaces Chrome's PDF viewer **in that same tab** with jev-duo's own reader,
 which renders the same pages with pdf.js and draws the highlights straight onto them: a highlighted
 passage gets the left rule and the `<kind> · <confidence>` tag over the text it was extracted from,
 and filler is veiled in white that lifts when you hover it. **← Back to the PDF** in the header
@@ -159,8 +159,7 @@ thing.) **Open the PDF reader** in the hint line opens the reader empty, in a ne
 does not send permissive CORS headers needs its own permission: the reader says
 `can't fetch this file from <origin>` and offers **Allow access to <origin>**, which asks Chrome for
 that one origin. **Open a PDF from your computer** reads a local file instead, which never touches
-the network at all. For an arXiv PDF the reader points at the HTML version of the same paper, which
-has real paragraphs and reads better. Pages are rendered as you reach them and released again once
+the network at all. Pages are rendered as you reach them and released again once
 you are well past them, so a long PDF does not sit in memory all at once; if a page cannot be
 rendered, its passages are shown as text in place so they stay readable and judgeable. A scanned PDF
 is rendered and scrollable like any other — there is simply nothing in it to judge, and the status
@@ -168,6 +167,15 @@ line says so. The manifest allows WebAssembly for the extension's own pages (`'w
 one relaxation Manifest V3 permits; no new permission, no remote code), because pdf.js compiles its
 bundled decoders whenever a PDF carries an ICC colour profile or a JPEG 2000 / JBIG2 image — without
 that line Chrome refuses the compile and lists the refusal on the extension's Errors page.
+
+**On an arXiv paper.** On an arXiv abstract or PDF page the popup offers **Read this paper** instead,
+and the whole thing happens on arxiv.org: arXiv publishes an HTML version of nearly every paper (even
+hep-th/9901001 has one), so the tab goes to that page and the ordinary in-page reader runs there — real
+paragraphs, no extension UI, and you never leave the site. A paper with no HTML version falls back to
+the rendered PDF reader in the same tab, so the click always lands on something readable. No new
+permission is involved: opening the popup grants access to that tab, and Chrome keeps that grant across
+a navigation within the same site. An arXiv `/html/` page is an ordinary web page, read with
+**Read this page** like any other.
 
 **What is sent.** Per passage: the passage text (capped at 1500 characters), the document title
 (capped at 200 characters) and its lead (capped at 600). Nothing else — no URL, no page, no

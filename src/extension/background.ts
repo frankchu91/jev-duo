@@ -25,8 +25,10 @@ import type { JevProvider, LlmProvider } from '../core/providers/types';
 import { ReadingJudge } from '../core/reading-judge';
 import { MAX_PASSAGES, type DocContext, type Passage } from '../core/reading';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
+import { arxivHtmlUrl } from './arxiv';
 import { BUILD_ID } from './build-id';
 import type { PagePlatform, PageSeenReport, Request, Response, Sender, Settings } from './messages';
+import type { ReadResult } from './read-page';
 import { isValidOrigin, reconcileSites, registerSite, unregisterSite } from './sites';
 import { loadExamples, loadPageSeen, loadSettings, loadStats, loadVerdicts, MAX_PAGE_REPORTS, MAX_VERDICTS, saveExamples, savePageSeen, saveSettings, saveStats, saveVerdicts } from './storage';
 
@@ -80,6 +82,29 @@ function resolveForSettings(settings: Settings, fetchImpl?: typeof fetch): Resol
   }
   const { jev, llm } = resolveProviders({ jev: 'mock', llm: 'mock', keys: {}, browser: true, fetchImpl, mockFixtures });
   return { jev, llm, hasKeys: false };
+}
+
+/** How long `readArxiv` waits for arXiv to serve the HTML version of a paper (§3.2) before giving up
+ * and saying so, rather than injecting into a page that may not be there yet. */
+const ARXIV_LOAD_TIMEOUT_MS = 20_000;
+
+/** Resolves true once Chrome reports `status: 'complete'` for `tabId`, false if that takes longer than
+ * `timeoutMs`. The listener is removed either way — a service worker that accumulated one per read
+ * would keep being woken by every navigation in every tab for the rest of its life. */
+function waitForTabComplete(tabId: number, timeoutMs = ARXIV_LOAD_TIMEOUT_MS): Promise<boolean> {
+  return new Promise((resolve) => {
+    const settle = (loaded: boolean): void => {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(loaded);
+    };
+    // Every other tab's navigations arrive here too, and so does this one's `status: 'loading'`.
+    const listener = (updatedTabId: number, change: { status?: string }): void => {
+      if (updatedTabId === tabId && change.status === 'complete') settle(true);
+    };
+    const timer = setTimeout(() => settle(false), timeoutMs);
+    chrome.tabs.onUpdated.addListener(listener);
+  });
 }
 
 /** Order-sensitive equality for two origin lists: `reconcileSites` returns a sorted list, so a stored
@@ -288,6 +313,34 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     return { ok: true, type: 'readPassages', focus, highlightShare, verdicts, usageTokens, errors, lastError };
   }
 
+  /** Addendum 2026-09-23 §3.2: **Read this paper**, from the click to the reader running on the page.
+   * It lives here rather than in the popup because the popup is gone the moment the user looks away,
+   * and this takes as long as arXiv takes to serve a paper.
+   *
+   * No host permission is needed for any of it: the click granted `activeTab` for this tab, and Chrome
+   * keeps that grant across a same-origin navigation, which arxiv.org -> arxiv.org is. */
+  async function handleReadArxiv(tabId: number, id: string, pdfUrl: string): Promise<Response> {
+    await chrome.tabs.update(tabId, { url: arxivHtmlUrl(id) });
+    if (!(await waitForTabComplete(tabId))) return { ok: false, error: 'the arXiv page did not finish loading' };
+
+    let result: ReadResult | undefined;
+    try {
+      const [injected] = await chrome.scripting.executeScript({ target: { tabId }, files: ['read-page.js'] });
+      result = injected?.result as ReadResult | undefined;
+    } catch (err) {
+      // A tab Chrome will not let a script into: reported rather than swallowed, because the tab has
+      // already been navigated and the user is looking at a page nothing is reading.
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (result?.state === 'started') return { ok: true, type: 'readArxiv', state: 'reading', passages: result.passages };
+
+    // Anything else means there was nothing to read on that page. arXiv answers 200 even for a paper
+    // with no HTML version — it serves a placeholder — so this is decided by what the injected reader
+    // found, never by an HTTP status. The rendered PDF reader is the fallback, in the same tab again.
+    await chrome.tabs.update(tabId, { url: chrome.runtime.getURL(`reader.html?src=${encodeURIComponent(pdfUrl)}`) });
+    return { ok: true, type: 'readArxiv', state: 'fallback' };
+  }
+
   async function handleCompile(intent: string): Promise<Response> {
     const current = agent;
     const pack = await current.compile(intent);
@@ -404,6 +457,10 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
         return handleJudge(req.items);
       case 'readPassages':
         return handleReadPassages(req.ctx, req.passages);
+      case 'readArxiv':
+        // Not queued behind the mutation queue: it changes no settings and touches no agent, and a
+        // navigation the user is watching must not sit behind a recompile.
+        return handleReadArxiv(req.tabId, req.id, req.pdfUrl);
       case 'compile':
         return enqueueMutation(() => handleCompile(req.intent));
       case 'recompile':
@@ -449,9 +506,11 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
       if (req.type === 'getState' && isPageContext(sender)) {
         return { ok: false, error: 'getState is not available to content scripts' };
       }
-      // Same rule, same reason, for the two requests that change which sites are enabled: a page must
-      // never be able to grant itself (or any other origin) the adapter just by sending a message.
-      if ((req.type === 'enableSite' || req.type === 'disableSite') && isPageContext(sender)) {
+      // Same rule, same reason, for the requests that change which sites are enabled — a page must
+      // never be able to grant itself (or any other origin) the adapter just by sending a message —
+      // and for `readArxiv`, which navigates a tab of the sender's choosing and injects a script into
+      // it. Only the popup's own click may do either.
+      if ((req.type === 'enableSite' || req.type === 'disableSite' || req.type === 'readArxiv') && isPageContext(sender)) {
         return { ok: false, error: `${req.type} is not available to content scripts` };
       }
       await ready;

@@ -156,6 +156,27 @@ describe('reader.ts wireUp (chrome-stubbed)', () => {
     delete (globalThis as { chrome?: unknown }).chrome;
     delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
     document.getElementById('jd-reader')?.remove();
+    // The one test below that drives `?src=` rewrites the page's URL; every other test here is a
+    // picker test and must not inherit it.
+    history.replaceState({}, '', '/');
+    vi.unstubAllGlobals();
+  });
+
+  // --- Design addendum 2026-09-23 §3.3: the hint now names the one-click way to do the same thing ---
+
+  it('points an arXiv PDF at its HTML version, and says the popup gets there in one click', async () => {
+    const pdfUrl = 'https://arxiv.org/pdf/1706.03762';
+    history.replaceState({}, '', `/reader.html?src=${encodeURIComponent(pdfUrl)}`);
+    // `?src=` means this page would fetch the PDF; a unit test never touches the network, and the
+    // rejection just lands on the reader's existing "can't fetch this file" path.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('no network in a unit test')));
+    await loadReader();
+    await flush();
+
+    const hint = el('arxiv-hint');
+    expect(hint.hidden).toBe(false);
+    expect(hint.textContent).toBe("arXiv also publishes an HTML version of most papers: open it — the popup's Read this paper does that in one click.");
+    expect(hint.querySelector('a')?.getAttribute('href')).toBe('https://arxiv.org/html/1706.03762');
   });
 
   // --- Review fix round 2, IMPORTANT A: a text-free PDF is a document, not an error page ---

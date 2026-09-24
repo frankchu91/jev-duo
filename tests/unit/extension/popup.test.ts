@@ -998,7 +998,9 @@ describe('initPopup', () => {
       doc.dispatchEvent(new Event('unload'));
     });
 
-    it.each(['https://example.test/paper.PDF', 'https://arxiv.org/pdf/1706.03762'])('offers Read this PDF for %s', async (url) => {
+    // An arXiv `/pdf/` URL used to land here too; addendum 2026-09-23 §3.1 gives it its own button, and
+    // the matrix below covers it.
+    it.each(['https://example.test/paper.PDF', 'https://files.example.test/2024/report.pdf'])('offers Read this PDF for %s', async (url) => {
       withTabs([{ id: 7, url }]);
       const doc = loadDoc();
       await initPopup(doc, { send: asSend(stateSend()) });
@@ -1089,6 +1091,131 @@ describe('initPopup', () => {
       doc.dispatchEvent(new Event('unload'));
     });
 
+    // --- Design addendum 2026-09-23 §3.1: an arXiv paper is read on arXiv's own HTML page ---
+
+    const ARXIV_HINT = 'opens the HTML version of this paper on arxiv.org and reads it there';
+
+    it.each(['https://arxiv.org/pdf/1706.03762', 'https://arxiv.org/pdf/1706.03762v7.pdf', 'https://arxiv.org/abs/2401.00001'])(
+      'offers Read this paper, and nothing else, on %s',
+      async (url) => {
+        withTabs([{ id: 7, url }]);
+        const doc = loadDoc();
+        await initPopup(doc, { send: asSend(stateSend()) });
+
+        expect(el<HTMLButtonElement>(doc, 'read-arxiv').hidden).toBe(false);
+        expect(el<HTMLButtonElement>(doc, 'read-page').hidden).toBe(true);
+        expect(el<HTMLButtonElement>(doc, 'read-pdf').hidden).toBe(true);
+        expect(el(doc, 'arxiv-hint').hidden).toBe(false);
+        expect(el(doc, 'arxiv-hint').textContent).toBe(ARXIV_HINT);
+
+        doc.dispatchEvent(new Event('unload'));
+      },
+    );
+
+    it('treats an arXiv HTML page as the ordinary web page it is', async () => {
+      withTabs([{ id: 7, url: 'https://arxiv.org/html/2401.00001' }]);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-page').hidden).toBe(false);
+      expect(el<HTMLButtonElement>(doc, 'read-arxiv').hidden).toBe(true);
+      expect(el<HTMLButtonElement>(doc, 'read-pdf').hidden).toBe(true);
+      expect(el(doc, 'arxiv-hint').hidden).toBe(true);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it.each(['https://example.test/post', 'https://example.test/paper.pdf'])('offers no paper button on %s', async (url) => {
+      withTabs([{ id: 7, url }]);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(stateSend()) });
+
+      expect(el<HTMLButtonElement>(doc, 'read-arxiv').hidden).toBe(true);
+      expect(el(doc, 'arxiv-hint').hidden).toBe(true);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    /** A `send` that answers `readArxiv` with `reply`, recording every request it was given. */
+    function arxivSend(reply: Response) {
+      const calls: Request[] = [];
+      const send = makeFakeSend((req) => {
+        calls.push(req);
+        if (req.type === 'getState') return getStateResponse();
+        if (req.type === 'readArxiv') return reply;
+        return { ok: true, type: 'setSettings' };
+      });
+      return { calls, send };
+    }
+
+    it('hands the paper to the background and reports that it is reading', async () => {
+      withTabs([{ id: 7, url: 'https://arxiv.org/abs/2401.00001' }]);
+      const doc = loadDoc();
+      const { calls, send } = arxivSend({ ok: true, type: 'readArxiv', state: 'reading', passages: 64 });
+      await initPopup(doc, { send: asSend(send) });
+
+      el<HTMLButtonElement>(doc, 'read-arxiv').click();
+      await flush();
+
+      expect(calls.filter((c) => c.type === 'readArxiv')).toEqual([
+        { type: 'readArxiv', tabId: 7, id: '2401.00001', pdfUrl: 'https://arxiv.org/pdf/2401.00001' },
+      ]);
+      expect(el(doc, 'read-status').textContent).toBe('reading 64 passages');
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(false);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('says what it is doing while the background navigates the tab', async () => {
+      withTabs([{ id: 7, url: 'https://arxiv.org/pdf/2401.00001' }]);
+      const doc = loadDoc();
+      const pending = deferred<Response>();
+      const send = makeFakeSend((req) => (req.type === 'getState' ? getStateResponse() : { ok: true, type: 'setSettings' }));
+      const withPendingArxiv = vi.fn(async (req: Request): Promise<Response> => (req.type === 'readArxiv' ? pending.promise : send(req)));
+      await initPopup(doc, { send: asSend(withPendingArxiv) });
+
+      el<HTMLButtonElement>(doc, 'read-arxiv').click();
+      await flush();
+      expect(el(doc, 'read-status').textContent).toBe('opening the HTML version…');
+
+      pending.resolve({ ok: true, type: 'readArxiv', state: 'fallback' });
+      await flush();
+      expect(el(doc, 'read-status').textContent).toBe('no HTML version — opening the PDF reader');
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('reports a background that could not do it', async () => {
+      withTabs([{ id: 7, url: 'https://arxiv.org/pdf/2401.00001' }]);
+      const doc = loadDoc();
+      const { send } = arxivSend({ ok: false, error: 'the arXiv page did not finish loading' });
+      await initPopup(doc, { send: asSend(send) });
+
+      el<HTMLButtonElement>(doc, 'read-arxiv').click();
+      await flush();
+
+      expect(el(doc, 'read-status').textContent).toBe("can't read this tab: the arXiv page did not finish loading");
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('sends nothing when the tab has no id', async () => {
+      withTabs([{ url: 'https://arxiv.org/pdf/2401.00001' }]); // a URL but no id
+      const doc = loadDoc();
+      const { calls, send } = arxivSend({ ok: true, type: 'readArxiv', state: 'reading', passages: 64 });
+      await initPopup(doc, { send: asSend(send) });
+
+      el<HTMLButtonElement>(doc, 'read-arxiv').click();
+      await flush();
+
+      expect(calls.filter((c) => c.type === 'readArxiv')).toEqual([]);
+      expect(el(doc, 'read-status').textContent).toBe("can't read this tab: no tab id");
+      expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
     // --- Design addendum 2026-09-23 §4: the PDF is replaced where it is, not copied to a new tab ---
 
     it('Read this PDF replaces the PDF in its own tab; the hint link still opens a new one', async () => {
@@ -1158,6 +1285,9 @@ describe('initPopup', () => {
 
       expect(el<HTMLButtonElement>(doc, 'read-page').disabled).toBe(true);
       expect(el<HTMLButtonElement>(doc, 'read-pdf').disabled).toBe(true);
+      // Read this paper goes the same way: a service worker from an older build has no readArxiv
+      // handler either, so the click could only ever fail.
+      expect(el<HTMLButtonElement>(doc, 'read-arxiv').disabled).toBe(true);
       expect(el(doc, 'read-status').textContent).toBe(STALE_POPUP_STATUS);
       expect(el(doc, 'read-status').classList.contains('error')).toBe(true);
       expect(STALE_POPUP_STATUS).toBe('reload the extension at chrome://extensions (↻) to finish updating');

@@ -8,6 +8,7 @@
 
 import type { DuoStats } from '../../core/duo';
 import type { QuestionPack } from '../../core/types';
+import { arxivPaperId, arxivPdfUrl } from '../arxiv';
 import { BUILD_ID } from '../build-id';
 import { isBuiltInHost } from '../built-in-hosts';
 import { DEFAULT_SETTINGS, send, type PageSeenReport, type Response, type Settings } from '../messages';
@@ -156,6 +157,8 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   const highlightShareEl = $<HTMLSelectElement>(doc, 'highlight-share');
   const readPageBtn = $<HTMLButtonElement>(doc, 'read-page');
   const readPdfBtn = $<HTMLButtonElement>(doc, 'read-pdf');
+  const readArxivBtn = $<HTMLButtonElement>(doc, 'read-arxiv');
+  const arxivHintEl = $(doc, 'arxiv-hint');
   const readStatusEl = $(doc, 'read-status');
   const openReaderEl = $<HTMLAnchorElement>(doc, 'open-reader');
   const intentEl = $<HTMLTextAreaElement>(doc, 'intent');
@@ -285,18 +288,28 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     readStatusEl.classList.toggle('error', isError);
   }
 
+  /** §3.1's button matrix, in order of precedence: an arXiv PDF or abstract page offers **Read this
+   * paper** alone (the paper is read on arXiv's own HTML page, in this tab); an arXiv `/html/` page is
+   * an ordinary web page and offers **Read this page**; everything else is unchanged. */
   function renderReading(): void {
     if (!tabUrl) {
       readPageBtn.hidden = false;
       readPageBtn.disabled = true;
       readPdfBtn.hidden = true;
+      readArxivBtn.hidden = true;
+      arxivHintEl.hidden = true;
       setReadStatus('not a web page');
       return;
     }
-    const pdf = looksLikePdf(tabUrl);
-    readPageBtn.hidden = pdf;
+    const paper = arxivPaperId(tabUrl) !== undefined;
+    // `looksLikePdf` matches an arXiv `/pdf/` URL too (it serves a PDF with no extension at all), and
+    // there the paper button wins: the HTML version has real paragraphs, a PDF only glyph positions.
+    const pdf = !paper && looksLikePdf(tabUrl);
+    readPageBtn.hidden = pdf || paper;
     readPageBtn.disabled = false;
     readPdfBtn.hidden = !pdf;
+    readArxivBtn.hidden = !paper;
+    arxivHintEl.hidden = !paper;
     setReadStatus('');
   }
 
@@ -311,6 +324,9 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
     if (build === BUILD_ID) return;
     readPageBtn.disabled = true;
     readPdfBtn.disabled = true;
+    // The same applies to Read this paper: a worker from an older build has no `readArxiv` handler
+    // either, so the click could only ever navigate the tab and then fail.
+    readArxivBtn.disabled = true;
     setReadStatus(STALE_POPUP_STATUS, true);
   }
 
@@ -507,6 +523,29 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   );
 
   readPdfBtn.addEventListener('click', readPdfInPlace);
+
+  // §3.1. Everything after this message is the background's: the navigation to arXiv's HTML version,
+  // waiting for it to load, injecting the reader, and falling back to the PDF reader if the paper has
+  // no HTML version. The popup only asks and then says what came back — it may well be closed by then,
+  // which is exactly why the sequence does not live here.
+  readArxivBtn.addEventListener(
+    'click',
+    guardClick([readArxivBtn], async () => {
+      const id = tabUrl === undefined ? undefined : arxivPaperId(tabUrl);
+      if (id === undefined) return;
+      if (tabId === undefined) {
+        setReadStatus("can't read this tab: no tab id", true);
+        return;
+      }
+      setReadStatus('opening the HTML version…');
+      const res = await send({ type: 'readArxiv', tabId, id, pdfUrl: arxivPdfUrl(id) });
+      if (!res.ok) {
+        setReadStatus(`can't read this tab: ${res.error}`, true);
+        return;
+      }
+      setReadStatus(res.state === 'reading' ? `reading ${res.passages} passages` : 'no HTML version — opening the PDF reader');
+    }),
+  );
   openReaderEl.addEventListener('click', (ev) => {
     ev.preventDefault();
     openReader();

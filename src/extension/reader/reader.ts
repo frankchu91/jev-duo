@@ -132,7 +132,9 @@ function wireUp(): void {
     const link = document.createElement('a');
     link.href = html;
     link.textContent = 'open it';
-    hintEl.append(link, ', then click Read this page — HTML gives better paragraphs than a PDF.');
+    // §3.3: the popup's **Read this paper** does exactly this — navigate to the HTML twin and read it
+    // there — without the two clicks, so the hint says where the shortcut is rather than only the path.
+    hintEl.append(link, " — the popup's Read this paper does that in one click.");
   }
 
   /** §4. Only a reader that REPLACED something has something to go back to: a picker-only reader, or

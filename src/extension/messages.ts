@@ -84,7 +84,13 @@ export type Request =
   // Reading mode (design addendum §9). Unlike `judge` this needs no compiled pack and is not gated by
   // enabledSites/genericSites: the user clicked Read on this document, and the click is the consent.
   // Any sender may call it — the reply carries probabilities about text the sender already has.
-  | { type: 'readPassages'; ctx: DocContext; passages: Passage[] };
+  | { type: 'readPassages'; ctx: DocContext; passages: Passage[] }
+  // arXiv in place (addendum 2026-09-23 §3.2): send `tabId` to arXiv's HTML version of paper `id` and
+  // run the ordinary in-page reader there; `pdfUrl` is what the extension's own PDF reader falls back
+  // to for a paper that has no HTML version. The whole sequence runs in the background so it survives
+  // the popup closing right after the click. Refused for a content-script sender, like enableSite: a
+  // page must never be able to navigate a tab of its choosing, or inject the reader into one.
+  | { type: 'readArxiv'; tabId: number; id: string; pdfUrl: string };
 
 export type Response =
   | { ok: true; type: 'judge'; verdicts: Verdict[] }
@@ -124,6 +130,10 @@ export type Response =
   // fallback there rather than a failed read.
   // `lastError` is the judge's most recent failed call (§3.1), so "65 errors" can say why.
   | { ok: true; type: 'readPassages'; focus: string; highlightShare?: number; verdicts: ReadingVerdict[]; usageTokens: number; errors: number; lastError?: string }
+  // Which of the two things happened on the arXiv page (§3.2): the reader is running on the HTML
+  // version, or there was no HTML version to read and the tab is now showing the PDF reader instead.
+  | { ok: true; type: 'readArxiv'; state: 'reading'; passages: number }
+  | { ok: true; type: 'readArxiv'; state: 'fallback' }
   | { ok: false; error: string };
 
 /** Wraps `chrome.runtime.sendMessage` in a Promise: resolves `{ok:false,error}` (never rejects) when

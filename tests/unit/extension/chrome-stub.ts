@@ -5,6 +5,9 @@
 
 type Listener = (message: unknown, sender: unknown, sendResponse: (response?: unknown) => void) => boolean | void;
 
+/** The slice of a `chrome.tabs.onUpdated` listener anything here reads: which tab, and how far along. */
+type TabUpdatedListener = (tabId: number, changeInfo: { status?: string }, tab: { id: number }) => void;
+
 /** What `chrome.runtime.getURL('')` resolves against here, i.e. the `sender.origin` every page of
  * this "extension" reports. A content script reports its host page's origin instead. */
 export const EXTENSION_ORIGIN = 'chrome-extension://jevduotestextensionid';
@@ -56,6 +59,13 @@ export interface ChromeStub {
   /** Every `(tabId, url)` passed to `chrome.tabs.update`, oldest first — how a test sees the popup
    * replacing a PDF in the tab that was showing it rather than opening a new one. */
   updatedTabs(): Array<{ tabId: number; url: string }>;
+  /** Fires `chrome.tabs.onUpdated` for one tab, as Chrome does as a navigation progresses (`'loading'`,
+   * then `'complete'`). The background waits for `'complete'` after sending a tab to arXiv's HTML twin
+   * (design addendum 2026-09-23 §3.2). */
+  fireTabUpdated(tabId: number, status: string): void;
+  /** How many `onUpdated` listeners are still registered: how a test sees one being removed again
+   * rather than left behind for the life of the service worker. */
+  tabUpdatedListenerCount(): number;
 }
 
 export function installChromeStub(): ChromeStub {
@@ -64,6 +74,7 @@ export function installChromeStub(): ChromeStub {
   let tabs: Array<{ id?: number; url?: string; title?: string }> = [];
   const createdTabs: string[] = [];
   const updatedTabs: Array<{ tabId: number; url: string }> = [];
+  const tabUpdatedListeners: TabUpdatedListener[] = [];
 
   // In-memory stand-in for the origin patterns Chrome would actually hold host permission for (e.g.
   // "https://mastodon.social/*"), and for the extension's dynamically registered content scripts,
@@ -175,6 +186,17 @@ export function installChromeStub(): ChromeStub {
         updatedTabs.push({ tabId, url: props.url ?? '' });
         return { id: tabId, url: props.url };
       },
+      /** Nothing is fired on its own: a navigation only ever "progresses" when a test says so, through
+       * `fireTabUpdated` below. */
+      onUpdated: {
+        addListener(fn: TabUpdatedListener): void {
+          tabUpdatedListeners.push(fn);
+        },
+        removeListener(fn: TabUpdatedListener): void {
+          const at = tabUpdatedListeners.indexOf(fn);
+          if (at >= 0) tabUpdatedListeners.splice(at, 1);
+        },
+      },
     },
     permissions,
     scripting,
@@ -198,5 +220,11 @@ export function installChromeStub(): ChromeStub {
     },
     createdTabs: () => [...createdTabs],
     updatedTabs: () => [...updatedTabs],
+    fireTabUpdated(tabId, status) {
+      // A copy: a listener that removes itself while being notified (which is exactly what waiting for
+      // one `complete` does) must not shorten the list being iterated.
+      for (const listener of [...tabUpdatedListeners]) listener(tabId, { status }, { id: tabId });
+    },
+    tabUpdatedListenerCount: () => tabUpdatedListeners.length,
   };
 }

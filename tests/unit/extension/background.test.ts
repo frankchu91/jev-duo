@@ -5,7 +5,7 @@ import { fnv1a } from '../../../src/core/hash';
 import { MAX_PASSAGES } from '../../../src/core/reading';
 import type { Example, Item, Verdict } from '../../../src/core/types';
 import { createBackground } from '../../../src/extension/background';
-import type { Response as MessageResponse } from '../../../src/extension/messages';
+import type { Request, Response as MessageResponse } from '../../../src/extension/messages';
 import { EXTENSION_ORIGIN, installChromeStub, type ChromeStub } from './chrome-stub';
 
 const mkItem = (id: string): Item => ({ id, platform: 'generic', text: `post ${id}` });
@@ -1089,6 +1089,104 @@ describe('background', () => {
 
       if (!res.ok || res.type !== 'readPassages') throw new Error('expected a readPassages response');
       expect(res.verdicts[0].core).toBe(0.05);
+    });
+  });
+
+  // --- arXiv in place (design addendum 2026-09-23 §3.2). The whole sequence runs HERE, not in the
+  // popup, so it finishes even when the popup closes right after the click. The flow itself needs
+  // arxiv.org and an activeTab grant, which the e2e harness cannot give it — these are its coverage. ---
+
+  describe('readArxiv', () => {
+    const PAPER = { tabId: 7, id: '1706.03762', pdfUrl: 'https://arxiv.org/pdf/1706.03762' } as const;
+    const HTML_URL = 'https://arxiv.org/html/1706.03762';
+
+    /** Resolves `chrome.scripting.executeScript` with one injection result, as Chrome would. */
+    function spyOnExecuteScript(result: unknown) {
+      const { scripting } = (globalThis as unknown as { chrome: { scripting: { executeScript(o: unknown): Promise<unknown> } } }).chrome;
+      return vi.spyOn(scripting, 'executeScript').mockResolvedValue([{ result }]);
+    }
+
+    /** Starts the request, lets it reach the point where it is waiting on the tab, then reports the
+     * navigation as finished — the ordering a real service worker sees. */
+    async function readArxivWithLoad(bg: { handle(req: Request): Promise<MessageResponse> }, status = 'complete'): Promise<MessageResponse> {
+      const pending = bg.handle({ type: 'readArxiv', ...PAPER });
+      await vi.advanceTimersByTimeAsync(1);
+      stub.fireTabUpdated(PAPER.tabId, 'loading'); // ignored: the page is not there yet
+      stub.fireTabUpdated(PAPER.tabId, status);
+      return pending;
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('sends the tab to the HTML twin, injects the reader there, and reports what it found', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const injected = spyOnExecuteScript({ state: 'started', passages: 42 });
+
+      const res = await readArxivWithLoad(bg);
+
+      expect(stub.updatedTabs()).toEqual([{ tabId: 7, url: HTML_URL }]);
+      expect(injected).toHaveBeenCalledWith({ target: { tabId: 7 }, files: ['read-page.js'] });
+      expect(res).toEqual({ ok: true, type: 'readArxiv', state: 'reading', passages: 42 });
+      // The listener is gone again: one per read, never one per read for the life of the worker.
+      expect(stub.tabUpdatedListenerCount()).toBe(0);
+    });
+
+    // arXiv answers 200 even for a paper that has no HTML version, so the fallback can only ever be
+    // triggered by what the injected script actually found on the page.
+    it('falls back to the rendered PDF reader when the HTML page is not an article', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      spyOnExecuteScript({ state: 'no-article', passages: 1 });
+
+      const res = await readArxivWithLoad(bg);
+
+      expect(stub.updatedTabs()).toEqual([
+        { tabId: 7, url: HTML_URL },
+        { tabId: 7, url: `${EXTENSION_ORIGIN}/reader.html?src=${encodeURIComponent(PAPER.pdfUrl)}` },
+      ]);
+      expect(res).toEqual({ ok: true, type: 'readArxiv', state: 'fallback' });
+      expect(stub.tabUpdatedListenerCount()).toBe(0);
+    });
+
+    it('gives up on a page that never finishes loading, and says so', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const injected = spyOnExecuteScript({ state: 'started', passages: 42 });
+
+      const pending = bg.handle({ type: 'readArxiv', ...PAPER });
+      await vi.advanceTimersByTimeAsync(1);
+      stub.fireTabUpdated(9, 'complete'); // another tab finishing its own navigation
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(await pending).toEqual({ ok: false, error: 'the arXiv page did not finish loading' });
+      expect(injected).not.toHaveBeenCalled(); // nothing is injected into a page that may not be there
+      expect(stub.tabUpdatedListenerCount()).toBe(0);
+    });
+
+    it('reports a refused injection rather than pretending the paper is being read', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const { scripting } = (globalThis as unknown as { chrome: { scripting: { executeScript(o: unknown): Promise<unknown> } } }).chrome;
+      vi.spyOn(scripting, 'executeScript').mockRejectedValue(new Error('Cannot access contents of the page'));
+
+      expect(await readArxivWithLoad(bg)).toEqual({ ok: false, error: 'Cannot access contents of the page' });
+    });
+
+    // Same rule, same reason, as enableSite/getState: a page must never be able to navigate a tab of
+    // its choosing — or inject the reader into one — just by sending a message.
+    it('is refused for a content-script sender', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const injected = spyOnExecuteScript({ state: 'started', passages: 42 });
+
+      const res = await bg.handle({ type: 'readArxiv', ...PAPER }, { tab: { id: 7 }, origin: 'https://arxiv.org' });
+
+      expect(res).toEqual({ ok: false, error: 'readArxiv is not available to content scripts' });
+      expect(stub.updatedTabs()).toEqual([]);
+      expect(injected).not.toHaveBeenCalled();
     });
   });
 });
