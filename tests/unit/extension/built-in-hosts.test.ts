@@ -32,3 +32,15 @@ describe('isBuiltInHost', () => {
     for (const host of hosts) expect(isBuiltInHost(host)).toBe(true);
   });
 });
+
+// pdf.js's worker compiles one of the bundled `.wasm` decoders whenever a PDF carries an ICC colour
+// profile or a JPX/JBIG2 image. Manifest V3's default content security policy refuses that compile
+// and Chrome lists the refusal on the extension's Errors page (the first field test hit it), so the
+// manifest must keep the one relaxation MV3 allows for WebAssembly — and nothing broader.
+describe('manifest content security policy', () => {
+  it('allows WebAssembly for extension pages and nothing broader', () => {
+    const csp = manifest.content_security_policy.extension_pages;
+    expect(csp).toBe("script-src 'self' 'wasm-unsafe-eval'; object-src 'self'");
+    expect(csp).not.toMatch(/'unsafe-inline'|'unsafe-eval'|https?:/);
+  });
+});

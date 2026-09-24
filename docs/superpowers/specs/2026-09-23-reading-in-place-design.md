@@ -30,7 +30,8 @@ renders the same pages, and draws the highlights on them.
 - **Errors carry their reason.** Whatever failed last is printed under the summary, in words.
 - **Nothing hidden, nothing new.** Dimming on a rendered page is a 65 % white veil (the same 35 %
   visibility as HTML dimming) that lifts on hover; highlights tint and bar the block. No new
-  permissions; the manifest is unchanged.
+  permissions; the only manifest change is the content security policy line that lets pdf.js
+  compile its WebAssembly decoders (§5.3).
 
 ## 3. Errors made visible
 
@@ -181,10 +182,14 @@ loading task; the reader calls it before opening the next document.
   `cMapUrl: chrome.runtime.getURL('cmaps/')`, `cMapPacked: true`, `wasmUrl: chrome.runtime.getURL('wasm/')`,
   so the standard 14 fonts render, CJK-encoded text extracts, and JPX/JBIG2 images decode. A missing
   folder fails the build with a one-line message, like the worker. Manifest V3's default content
-  security policy has no `wasm-unsafe-eval`, so pdf.js cannot instantiate the `.wasm` decoders and uses
-  the JavaScript fallbacks shipped in the same `wasm/` folder (`jbig2_nowasm_fallback.js`,
-  `openjpeg_nowasm_fallback.js`) — JBIG2/JPX images still decode, only slower; ICC (qcms) has no
-  fallback and colour profiles are a non-goal (§8), and the manifest is left unchanged.
+  security policy refuses to compile WebAssembly, and pdf.js's worker compiles one of those `.wasm`
+  decoders whenever a PDF carries an ICC colour profile or a JPX/JBIG2 image — the first field test
+  hit exactly that: Chrome recorded the refusal on the extension's Errors page against
+  `pdf.worker.mjs`. The manifest therefore declares
+  `"content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }`,
+  the one relaxation Manifest V3 allows for WebAssembly; it grants no permission and loads no remote
+  code. A unit test pins it. (Without it pdf.js falls back to the slower JavaScript decoders shipped
+  in the same folder and skips colour profiles, but Chrome still logs the refusal.)
 
 ## 6. Tests
 

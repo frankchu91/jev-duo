@@ -115,12 +115,13 @@ outputs.push(rel(workerDest));
 // which needs no web_accessible_resources entry, exactly like the worker above. Same guard, too: a
 // missing folder is a one-line build failure rather than a PDF that renders blank at runtime.
 //
-// The `.wasm` files in that folder are never actually instantiated under Manifest V3: its default
-// content security policy has no `wasm-unsafe-eval`, so pdf.js falls back to the JavaScript decoders
-// shipped in the same folder (jbig2_nowasm_fallback.js, openjpeg_nowasm_fallback.js) — JBIG2 and JPX
-// images still decode, only slower. ICC (qcms) has no JS fallback and colour profiles are a spec
-// non-goal. The manifest is deliberately left alone: a CSP relaxed for a rare speed-up is not a trade
-// this extension makes.
+// The `.wasm` files in that folder need `'wasm-unsafe-eval'` in the extension's content security
+// policy (manifest.json, `content_security_policy.extension_pages`): Manifest V3's default policy
+// refuses to compile WebAssembly, and pdf.js's worker tries to whenever a PDF carries an ICC colour
+// profile or a JPX/JBIG2 image — Chrome then records the refusal on the extension's Errors page,
+// which is how the field test found it. With the policy in place the decoders load; without it
+// pdf.js would fall back to the slower JavaScript decoders shipped in the same folder
+// (jbig2_nowasm_fallback.js, openjpeg_nowasm_fallback.js) and colour profiles would be skipped.
 for (const folder of ['standard_fonts', 'cmaps', 'wasm']) {
   const from = path.join(root, 'node_modules', 'pdfjs-dist', folder);
   if (!existsSync(from)) {

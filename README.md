@@ -151,10 +151,10 @@ has real paragraphs and reads better. Pages are rendered as you reach them and r
 you are well past them, so a long PDF does not sit in memory all at once; if a page cannot be
 rendered, its passages are shown as text in place so they stay readable and judgeable. A scanned PDF
 is rendered and scrollable like any other — there is simply nothing in it to judge, and the status
-line says so. Chrome's default extension content security policy allows no WebAssembly, so pdf.js
-decodes JBIG2 and JPX images with the JavaScript fallbacks it ships beside its `.wasm` decoders —
-those images still appear, only more slowly — and ICC colour profiles, which have no fallback, are not
-applied.
+line says so. The manifest allows WebAssembly for the extension's own pages (`'wasm-unsafe-eval'`, the
+one relaxation Manifest V3 permits; no new permission, no remote code), because pdf.js compiles its
+bundled decoders whenever a PDF carries an ICC colour profile or a JPEG 2000 / JBIG2 image — without
+that line Chrome refuses the compile and lists the refusal on the extension's Errors page.
 
 **What is sent.** Per passage: the passage text (capped at 1500 characters), the document title
 (capped at 200 characters) and its lead (capped at 600). Nothing else — no URL, no page, no
