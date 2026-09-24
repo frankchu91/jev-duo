@@ -10,7 +10,7 @@ import type { DuoStats } from '../../core/duo';
 import type { QuestionPack } from '../../core/types';
 import { BUILD_ID } from '../build-id';
 import { isBuiltInHost } from '../built-in-hosts';
-import { send, type PageSeenReport, type Response, type Settings } from '../messages';
+import { DEFAULT_SETTINGS, send, type PageSeenReport, type Response, type Settings } from '../messages';
 import type { ReadResult } from '../read-page';
 
 const DEBOUNCE_MS = 300;
@@ -153,6 +153,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   if (versionEl && typeof chrome !== 'undefined') versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
 
   const focusEl = $<HTMLInputElement>(doc, 'focus');
+  const highlightShareEl = $<HTMLSelectElement>(doc, 'highlight-share');
   const readPageBtn = $<HTMLButtonElement>(doc, 'read-page');
   const readPdfBtn = $<HTMLButtonElement>(doc, 'read-pdf');
   const readStatusEl = $(doc, 'read-status');
@@ -201,6 +202,10 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
 
   function fillSettings(s: Settings): void {
     focusEl.value = s.focus;
+    // A share the <select> has no option for (an older or hand-edited setting) would blank the control,
+    // so it falls back to the option that is really in effect by default.
+    highlightShareEl.value = String(s.highlightShare);
+    if (highlightShareEl.selectedIndex === -1) highlightShareEl.value = String(DEFAULT_SETTINGS.highlightShare);
     intentEl.value = s.intent;
     strictnessEl.value = String(s.strictness);
     updateStrictnessDisplay();
@@ -509,6 +514,10 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
 
   const debouncedFocus = debounce((v: string) => patchSettings({ focus: v }), DEBOUNCE_MS);
   focusEl.addEventListener('input', () => debouncedFocus(focusEl.value));
+
+  // §2.4: reading mode's own strictness. The feed-mode Strictness slider deliberately still does not
+  // apply to reading, which is why this is a separate control and a separate setting.
+  highlightShareEl.addEventListener('change', () => patchSettings({ highlightShare: Number(highlightShareEl.value) }));
 
   arbiterEl.addEventListener('change', () => patchSettings({ arbiter: arbiterEl.checked }));
   siteXEl.addEventListener('change', () => patchSettings({ enabledSites: currentSites() }));

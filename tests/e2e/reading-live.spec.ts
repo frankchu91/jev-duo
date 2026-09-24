@@ -88,7 +88,18 @@ test('reading mode: the built extension reads the article fixture with no errors
     await expect(progress).toHaveText(/^21 passages · /, { timeout: 120_000 });
     await expect(progress).not.toHaveText(/errors/);
     await expect(article.locator('#jd-reader p.error')).toHaveText('');
-    expect(await article.locator('.jd-hl').count()).toBeGreaterThanOrEqual(1);
+
+    // Addendum 2026-09-23 §2: the field-test document (every paragraph over the absolute line) cannot
+    // be fetched offline, so this is the same shape through the fixture — with the REAL provider's own
+    // probabilities, which is the half a mock cannot check. Relative, so the assertion is a bound
+    // rather than a set: ceil(21 × 0.25) = 6 highlights at most, floor(21 × 0.2) = 4 dims at most, and
+    // at least one highlight, because a document that reads as nothing at all would be the regression.
+    const highlights = await article.locator('.jd-hl').count();
+    expect(highlights).toBeGreaterThanOrEqual(1);
+    expect(highlights).toBeLessThanOrEqual(6);
+    expect(await article.locator('.jd-dim').count()).toBeLessThanOrEqual(4);
+    await expect(article.locator('#jd-reader ol li')).toHaveCount(highlights);
+    console.log(`live reading through the extension: ${highlights} highlights of 21 passages`);
   } finally {
     await ext.close();
   }

@@ -63,7 +63,7 @@ describe('ReadingJudge', () => {
 
     expect(jev.requests).toHaveLength(2);
     expect(jev.requests.map((r) => r.meta?.itemId).sort()).toEqual(items.map((p) => p.id).sort());
-    expect(jev.requests[0].questions.map((q) => q.id)).toEqual(['core', 'focus', 'kind']);
+    expect(jev.requests[0].questions.map((q) => q.id)).toEqual(['core', 'key', 'focus', 'kind']);
     expect(jev.requests[0].state).toEqual({ document_title: 'Sample Paper', document_lead: 'A lead paragraph.', passage: expect.any(String) });
   });
 
@@ -121,7 +121,7 @@ describe('ReadingJudge', () => {
     const run = await new ReadingJudge(hung, { timeoutMs: 10 }).judge(CTX, '', items);
 
     expect(run.errors).toBe(1);
-    expect(run.verdicts[0]).toEqual({ id: items[0].id, verdict: 'plain', p: 0.5, core: 0.5, error: true });
+    expect(run.verdicts[0]).toEqual({ id: items[0].id, verdict: 'plain', p: 0.5, core: 0.5, key: 0.5, error: true });
   });
 
   it('turns a throwing provider into the same fail-open verdict, and never caches it', async () => {

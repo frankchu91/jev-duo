@@ -22,17 +22,38 @@ const ABSTRACT =
   'We study how attention layers behave on documents far longer than the window they were trained on, and show that a fixed sinusoidal encoding degrades more gracefully than a learned one.';
 const METHOD =
   'The method encodes each input token as a vector, adds a positional signal to it, and then applies a stack of attention layers in which every position attends to every other position of the same sequence.';
+const POSITIONAL =
+  'Positional information is represented by fixed sinusoidal functions of the position index, one frequency per embedding dimension.';
+const CLAIM =
+  'We take the opposite approach and keep the whole document, paying for it with a cheaper comparison between positions that are far apart.';
+const RESULT =
+  'Past that length the baseline falls away quickly, while our model loses less than two points of accuracy out to sixty four thousand tokens.';
+const ABLATION =
+  'Ablating the sinusoidal encoding in favour of a learned one costs four points at the longest length and nothing at all at the shortest.';
 const ACK =
   'We thank our colleagues for their comments on an earlier draft, the reviewers for their careful reading, and the maintainers of the open source libraries this work depends on.';
 const BOILER =
   'This work was supported by internal funding. The authors declare no competing interests. Correspondence should be addressed to the first author.';
 
+// Addendum 2026-09-23 §2: highlights are the top share of a document, ranked on `key`, so the fixtures
+// seed `key` alongside `core` — six passages the ranking must pick (descending, so the order is fixed
+// too) and two it must dim. The mock answers any question it has no fixture for from its own
+// text-overlap heuristic, which lands nowhere near the 0.5 floor for a `key` question.
 const MOCK_FIXTURES: Record<string, Record<string, number>> = {
-  [id(ABSTRACT)]: { core: 0.95 },
-  [id(METHOD)]: { core: 0.95 },
-  [id(ACK)]: { core: 0.05 },
-  [id(BOILER)]: { core: 0.05 },
+  [id(ABSTRACT)]: { core: 0.95, key: 0.95 },
+  [id(METHOD)]: { core: 0.95, key: 0.94 },
+  [id(RESULT)]: { core: 0.9, key: 0.93 },
+  [id(POSITIONAL)]: { core: 0.9, key: 0.92 },
+  [id(ABLATION)]: { core: 0.9, key: 0.91 },
+  [id(CLAIM)]: { core: 0.9, key: 0.9 },
+  [id(ACK)]: { core: 0.02, key: 0.03 },
+  [id(BOILER)]: { core: 0.02, key: 0.03 },
 };
+
+/** Math.ceil(21 × HIGHLIGHT_SHARE) over the article fixture's 21 passages. */
+const EXPECTED_HIGHLIGHTS = 6;
+/** Math.floor(21 × DIM_SHARE): the two pinned dims plus the two lowest-scoring paragraphs after them. */
+const EXPECTED_DIMS = 4;
 
 test.describe.configure({ mode: 'serial' });
 
@@ -58,19 +79,24 @@ test('Read this page highlights, dims, lists and then stops', async () => {
   await popup.locator('#read-page').click();
   await expect(popup.locator('#read-status')).toHaveText('reading 21 passages');
 
-  // The two pinned highlights and the two pinned dims; everything else is whatever the mock's
-  // text-overlap heuristic made of it, which is why the counts below are relative, not absolute.
-  await expect(article.locator('#p-abstract')).toHaveClass(/jd-hl/);
-  await expect(article.locator('#p-method-1')).toHaveClass(/jd-hl/);
+  // The panel only settles once the whole document has been ranked (§2.3: nothing is decorated before
+  // the last batch is in), so the summary line is waited on first and every count below reads a
+  // finished run rather than a mid-flight snapshot.
+  await expect(article.locator('#jd-reader .progress')).toHaveText(/^21 passages · /);
+
+  // The six pinned highlights — exactly the top share of the document by `key` — and the two pinned
+  // dims. The tag carries the probability the passage was RANKED on, which is now `key`.
+  await expect(article.locator('.jd-hl')).toHaveCount(EXPECTED_HIGHLIGHTS);
+  for (const pinned of ['#p-abstract', '#p-method-1', '#p-method-2', '#p-intro-3', '#p-results-2', '#p-results-4']) {
+    await expect(article.locator(pinned)).toHaveClass(/jd-hl/);
+  }
   await expect(article.locator('#p-ack')).toHaveClass(/jd-dim/);
   await expect(article.locator('#p-boiler')).toHaveClass(/jd-dim/);
+  await expect(article.locator('.jd-dim')).toHaveCount(EXPECTED_DIMS);
   await expect(article.locator('#p-abstract .jd-rtag')).toHaveText(/95%$/);
 
   // Playwright's CSS engine pierces the panel's open shadow root, so the list is addressable here.
-  const highlights = await article.locator('.jd-hl').count();
-  expect(highlights).toBeGreaterThanOrEqual(2);
-  await expect(article.locator('#jd-reader ol li')).toHaveCount(highlights);
-  await expect(article.locator('#jd-reader .progress')).toHaveText(/^21 passages · /);
+  await expect(article.locator('#jd-reader ol li')).toHaveCount(EXPECTED_HIGHLIGHTS);
 
   await article.getByRole('button', { name: 'Show all' }).click();
   await expect(article.locator('.jd-dim')).toHaveCount(0);

@@ -995,6 +995,23 @@ describe('background', () => {
       expect(res.verdicts[0]).toMatchObject({ verdict: 'highlight', focus: 0.9, core: 0.1 });
     });
 
+    // --- Design addendum 2026-09-23 §2.4: the reader ranks the document, so the share travels with
+    // the verdicts — a content script cannot read Settings for itself. ---
+
+    it('reports the highlight share the reader must rank the document with', async () => {
+      const bg = createBackground();
+      await bg.ready;
+
+      const first = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:1', 'some text')] });
+      if (!first.ok || first.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(first.highlightShare).toBe(0.25); // DEFAULT_SETTINGS
+
+      await bg.handle({ type: 'setSettings', patch: { highlightShare: 0.4 } });
+      const second = await bg.handle({ type: 'readPassages', ctx, passages: [passage('rd:2', 'other text')] });
+      if (!second.ok || second.type !== 'readPassages') throw new Error('expected a readPassages response');
+      expect(second.highlightShare).toBe(0.4);
+    });
+
     it('is available to a content-script sender: reading carries no secrets', async () => {
       const bg = createBackground();
       await bg.ready;

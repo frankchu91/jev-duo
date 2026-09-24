@@ -273,7 +273,8 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
    * settings are live the moment it is next needed, while surviving every settings change in between
    * that didn't actually change the provider — which is what lets its own cache do its job. */
   async function handleReadPassages(ctx: DocContext, passages: Passage[]): Promise<Response> {
-    const focus = settings.focus;
+    // Both read up front, before the first await, so one reply always describes one settings snapshot.
+    const { focus, highlightShare } = settings;
     if (readingJudgeStale || !readingJudge) {
       readingJudge = new ReadingJudge(resolveForSettings(settings, deps.fetchImpl).jev);
       readingJudgeStale = false;
@@ -282,7 +283,9 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
     // sender (it carries no secrets and is not gated by enabledSites), so the ceiling on what one
     // message can cost belongs on this side of the port as well.
     const { verdicts, usageTokens, errors, lastError } = await readingJudge.judge(ctx, focus, passages.slice(0, MAX_PASSAGES));
-    return { ok: true, type: 'readPassages', focus, verdicts, usageTokens, errors, lastError };
+    // The reader ranks the document itself (addendum §2.3), so the share it ranks with travels with the
+    // verdicts: a content script cannot read Settings, and this handler is the only place that can.
+    return { ok: true, type: 'readPassages', focus, highlightShare, verdicts, usageTokens, errors, lastError };
   }
 
   async function handleCompile(intent: string): Promise<Response> {

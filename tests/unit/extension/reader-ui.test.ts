@@ -25,6 +25,7 @@ const verdict = (id: string, v: ReadingVerdict['verdict'], extra: Partial<Readin
   verdict: v,
   p: 0.82,
   core: 0.82,
+  key: 0.82,
   ...extra,
 });
 
@@ -427,7 +428,9 @@ describe('mountReader with passages that share an id', () => {
 describe('runReading', () => {
   const ctx: DocContext = { title: 'T', lead: 'L', source: 'https://example.test/p' };
 
-  /** A `send` that answers every readPassages batch by highlighting the first passage in it. */
+  /** A `send` that answers every readPassages batch with one provisional (always `plain`) verdict per
+   * passage, `key` and `focus` descending with document position — so the ranking in reading.ts, which
+   * is what now decides, picks the top of the document and does so predictably either way. */
   function sendSpy(over: (req: Request) => Response | undefined = () => undefined) {
     const calls: Request[] = [];
     const fn = vi.fn(async (req: Request): Promise<Response> => {
@@ -439,7 +442,7 @@ describe('runReading', () => {
         ok: true,
         type: 'readPassages',
         focus: 'the question',
-        verdicts: req.passages.map((p, i) => verdict(p.id, i === 0 ? 'highlight' : 'plain')),
+        verdicts: req.passages.map((p) => verdict(p.id, 'plain', { key: 1 - p.index / 100, focus: 1 - p.index / 100 })),
         usageTokens: 10 * req.passages.length,
         errors: 0,
       };
@@ -464,15 +467,81 @@ describe('runReading', () => {
     expect(summary.errors).toBe(0);
   });
 
-  it('applies each batch as it lands, shows the focus once, and finishes', async () => {
-    const { doc, passages } = docWith(13);
+  // --- Design addendum 2026-09-23 §2.3: two phases. Highlights are the top share of the WHOLE
+  // document, so nothing can be applied until every batch is in — only the progress line moves. ---
+
+  it('applies nothing until the last batch is in, then the whole ranked set at once', async () => {
+    const { doc, passages } = docWith(13); // two batches at the default size: 12 + 1
     const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    const applySpy = vi.spyOn(handle, 'apply');
+    const appliedWhenSent: number[] = [];
+    const progressWhenSent: Array<string | null | undefined> = [];
+    const spy = sendSpy(() => {
+      appliedWhenSent.push(applySpy.mock.calls.length);
+      progressWhenSent.push(panelOf(doc).querySelector('.progress')?.textContent);
+      return undefined;
+    });
 
-    await runReading({ handle, ctx, passages, send: sendSpy().send });
+    await runReading({ handle, ctx, passages, send: spy.send });
 
-    expect(doc.querySelectorAll('.jd-hl')).toHaveLength(2); // one per batch
+    // Nothing had been applied when either batch went out — including the second, sent after the first
+    // batch's verdicts had already come back.
+    expect(appliedWhenSent).toEqual([0, 0]);
+    expect(progressWhenSent).toEqual(['0 of 13 judged', '12 of 13 judged']);
+    // ceil(13 × 0.25) = 4 highlights, taken from the top of the document by `key`.
+    expect(applySpy).toHaveBeenCalledTimes(13);
+    expect([...doc.querySelectorAll('.jd-hl')].map((el) => el.id)).toEqual(['p0', 'p1', 'p2', 'p3']);
+    expect(panelOf(doc).querySelectorAll('li')).toHaveLength(4);
     expect(panelOf(doc).querySelector('.focus')?.textContent).toBe('focus: the question');
     expect(panelOf(doc).querySelector('.progress')?.textContent).toMatch(/^13 passages · /);
+  });
+
+  it('ranks the document with the share the background reported', async () => {
+    const { doc, passages } = docWith(13);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    const spy = sendSpy((req) =>
+      req.type === 'readPassages'
+        ? {
+            ok: true,
+            type: 'readPassages',
+            focus: '',
+            verdicts: req.passages.map((p) => verdict(p.id, 'plain', { key: 1 - p.index / 100 })),
+            usageTokens: 0,
+            errors: 0,
+            highlightShare: 0.15,
+          }
+        : undefined,
+    );
+
+    await runReading({ handle, ctx, passages, send: spy.send });
+
+    // ceil(13 × 0.15) = 2, where the default share would have highlighted 4.
+    expect([...doc.querySelectorAll('.jd-hl')].map((el) => el.id)).toEqual(['p0', 'p1']);
+  });
+
+  it('ranks on focus when the reply says one was applied', async () => {
+    const { doc, passages } = docWith(4);
+    const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
+    // `key` says the first passage; the focus says the last one. The reply's non-empty focus is what
+    // decides which of the two the ranking sorts on.
+    const focuses = [0.1, 0.2, 0.3, 0.95];
+    const spy = sendSpy((req) =>
+      req.type === 'readPassages'
+        ? {
+            ok: true,
+            type: 'readPassages',
+            focus: 'what did it cost',
+            verdicts: req.passages.map((p) => verdict(p.id, 'plain', { key: 1 - p.index / 100, focus: focuses[p.index] })),
+            usageTokens: 0,
+            errors: 0,
+          }
+        : undefined,
+    );
+
+    await runReading({ handle, ctx, passages, send: spy.send });
+
+    expect([...doc.querySelectorAll('.jd-hl')].map((el) => el.id)).toEqual(['p3']);
+    expect(passages[3].el.querySelector('.jd-rtag')?.textContent).toBe('95%'); // the focus probability it was ranked on
   });
 
   it('counts a batch the background could not answer as errors, and applies nothing', async () => {
@@ -519,19 +588,18 @@ describe('runReading', () => {
     expect(finishSpy).not.toHaveBeenCalled();
   });
 
-  it('applies a batch that lands before destruction, but discards one destroyed mid-flight and stops there', async () => {
+  it('stops the loop, and never ranks, when the reader is destroyed mid-flight', async () => {
     const { doc, passages } = docWith(30); // 3 batches at size 12: 12, 12, 6
     const handle = mountReader(doc, { passages, focus: '', onClose: () => {} });
     // A spy (not a DOM check): destroy() itself unconditionally strips every jd-hl/jd-dim it or any
     // earlier batch added — restoring the page is the whole point — so the DOM alone can't tell
-    // "batch 2's verdicts were never applied" apart from "they were applied and then wiped along with
-    // batch 1's". Counting the calls can.
+    // "nothing was applied" apart from "it was applied and then wiped". Counting the calls can.
     const applySpy = vi.spyOn(handle, 'apply');
     const calls: Request[] = [];
     const fn = vi.fn(async (req: Request): Promise<Response> => {
       calls.push(structuredClone(req));
       if (req.type !== 'readPassages') return { ok: false, error: 'unhandled' };
-      const res: Response = { ok: true, type: 'readPassages', focus: 'q', verdicts: req.passages.map((p) => verdict(p.id, 'highlight')), usageTokens: 10, errors: 0 };
+      const res: Response = { ok: true, type: 'readPassages', focus: 'q', verdicts: req.passages.map((p) => verdict(p.id, 'plain')), usageTokens: 10, errors: 0 };
       if (calls.length === 2) handle.destroy(); // the SECOND reply is the one still in flight at close time
       return res;
     });
@@ -539,8 +607,10 @@ describe('runReading', () => {
     await runReading({ handle, ctx, passages, send: fn as unknown as typeof send, batchSize: 12 });
 
     expect(fn).toHaveBeenCalledTimes(2); // the third batch (passages 24..29) was never sent
-    expect(applySpy).toHaveBeenCalledTimes(12); // only the first (undestroyed) batch's verdicts were applied
-    expect(doc.querySelectorAll('.jd-hl, .jd-dim, .jd-rtag')).toHaveLength(0); // destroy() restored the page
+    // §2.3: the ranking is the only thing that applies anything, and a document that was never finished
+    // is never ranked — so a closed reader leaves the page exactly as it found it.
+    expect(applySpy).not.toHaveBeenCalled();
+    expect(doc.querySelectorAll('.jd-hl, .jd-dim, .jd-rtag')).toHaveLength(0);
   });
 
   // --- Design addendum 2026-09-23 §3.1: the summary carries the reason, not just the count ---

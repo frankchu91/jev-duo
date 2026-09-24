@@ -131,6 +131,19 @@ back when you hover it. Nothing is ever hidden. The panel in the bottom-right li
 in document order — click one to scroll to it — and has **Show all** (bring the dimmed passages back)
 and **Close**. Pressing **Read this page** a second time puts the page back exactly as it was.
 
+**How much gets highlighted.** Highlights are the top share of *one document*, not everything over a
+fixed line. Jev is asked, per passage, whether it is one of the few a reader skimming for the
+essentials must not miss, and the passages that score highest on that win: by default the top 25 %,
+rounded up, and the **Highlight** box next to the question offers the top 15 % or the top 40 %
+instead. An absolute threshold cannot select on an article — measured on an eleven-paragraph news
+piece, every paragraph scored between 0.86 and 0.94 on "does this carry the document's own content?",
+because on an article almost every paragraph does, and all eleven were highlighted. Dimming is the
+mirror image: the least substantive fifth of the document, rounded down, so a short document dims
+nothing. Two absolute guards remain — a passage under 50 % is never highlighted (a document with
+nothing worth highlighting gets nothing), and one over 50 % is never dimmed, nor is one your question
+likes. Because the shares are of the whole document, the panel counts `N of M judged` while it works
+and fills the page in once the last passage is in.
+
 If the page is not a document — a feed, an app shell, a docs page of four short paragraphs — the
 popup says `this page does not look like an article (N passages)` and nothing is touched. Reading
 needs at least 6 paragraphs and 1500 characters inside one container to call something an article.
@@ -164,8 +177,9 @@ permission is added to the manifest for any of this. The question you type is sh
 panel, which uses an open shadow root, so a script on the page you are reading can read it back —
 nothing else about you leaves the browser.
 
-**Limits.** Reading is explicit, per document, and never runs on its own. Judgments use fixed
-thresholds — the **Strictness** slider is a feed-mode control and does not apply. A passage whose
+**Limits.** Reading is explicit, per document, and never runs on its own. Highlights and dims are
+shares of the document you are reading, set by the **Highlight** box next to the question — the
+**Strictness** slider is a feed-mode control and still does not apply here. A passage whose
 judgment fails or times out is shown plain rather than dimmed, and when anything failed the panel
 prints a second line naming the last error. Documents are capped at 600 passages.
 

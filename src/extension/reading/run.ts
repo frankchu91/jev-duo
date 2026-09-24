@@ -1,11 +1,16 @@
 // The shared reading loop (design addendum §8.1 and §6.3): passages go to the background in document
-// order, in batches, and each batch's verdicts are applied the moment it answers. Both readers — the
-// one injected into a page and the PDF reader page — run exactly this, which is the only reason the
-// two produce the same panel from the same judgments.
+// order, in batches. Both readers — the one injected into a page and the PDF reader page — run exactly
+// this, which is the only reason the two produce the same panel from the same judgments.
+//
+// TWO PHASES (addendum 2026-09-23 §2.3). Verdicts used to be applied as each batch answered; they are
+// now collected, and the document is decorated only once every batch is in. Highlights are the top
+// share of the WHOLE document (rankReading), so no verdict can be decided while passages are still
+// unjudged — a passage that looks like the best of the first twelve is often nowhere near the best of
+// two hundred. What the reader sees while it waits is the progress line, which was always there.
 //
 // This is the only file under reading/ that knows about messaging; reader-ui.ts stays pure DOM.
 
-import type { DocContext, Passage } from '../../core/reading';
+import { rankReading, type DocContext, type Passage, type ReadingVerdict } from '../../core/reading';
 import type { send } from '../messages';
 import type { ReaderHandle } from './reader-ui';
 
@@ -32,6 +37,11 @@ export async function runReading(deps: {
   // explains the run (a stale service worker answers every later batch identically anyway).
   let lastError: string | undefined;
   let focusShown = false;
+  // Every verdict of this document, in batch order, plus the two things the background decides that the
+  // ranking needs: whether a focus was applied at all, and how big a share of the document to highlight.
+  const collected: ReadingVerdict[] = [];
+  let focus = '';
+  let highlightShare: number | undefined;
 
   handle.setProgress(0, passages.length);
   for (let i = 0; i < passages.length; i += size) {
@@ -50,9 +60,11 @@ export async function runReading(deps: {
     if (res.ok && res.type === 'readPassages') {
       if (!focusShown) {
         handle.setFocus(res.focus);
+        focus = res.focus;
+        highlightShare = res.highlightShare;
         focusShown = true;
       }
-      for (const verdict of res.verdicts) handle.apply(verdict);
+      collected.push(...res.verdicts);
       usageTokens += res.usageTokens;
       errors += res.errors;
       if (lastError === undefined && res.lastError !== undefined) lastError = res.lastError;
@@ -69,7 +81,13 @@ export async function runReading(deps: {
 
   const summary = { ms: now() - started, usageTokens, errors, lastError };
   // A destroyed reader has nothing left to show a summary on; `finish` would no-op anyway, but the
-  // panel is gone either way, so there's no reason to touch it.
-  if (!handle.isDestroyed()) handle.finish(summary);
+  // panel is gone either way, so there's no reason to touch it — and a document whose loop was cut
+  // short is never ranked, because the share it would be ranked against was never fully judged.
+  if (handle.isDestroyed()) return summary;
+  // Phase two: one ranking over the whole document, then one pass of decoration. `apply` still takes
+  // the first verdict per id and ignores the rest, which is exactly right — every id is applied once
+  // here, and a document that repeats a paragraph verbatim hands the same id to each copy.
+  for (const verdict of rankReading(collected, focus.trim() !== '', highlightShare)) handle.apply(verdict);
+  handle.finish(summary);
   return summary;
 }

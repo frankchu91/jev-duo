@@ -24,6 +24,9 @@ export interface Settings {
   strictness: number; // 0..1, default 0.5
   arbiter: boolean; // default true
   focus: string; // reading mode's "what are you looking for?", inlined into the focus question; default ''
+  /** Reading mode's strictness (addendum 2026-09-23 §2.4): the share of a document's passages that get
+   * highlighted, rounded up. Deliberately separate from `strictness`, which is a feed-mode control. */
+  highlightShare: number; // 0.15 | 0.25 | 0.4 in the popup; default 0.25
   enabledSites: Record<SiteId, boolean>; // default all true
   genericSites: string[]; // origins (e.g. "https://mastodon.social") the user opted the generic adapter into; default []
   mockFixtures?: Record<string, Record<string, number>>; // test hook
@@ -36,6 +39,7 @@ export const DEFAULT_SETTINGS: Settings = {
   strictness: 0.5,
   arbiter: true,
   focus: '',
+  highlightShare: 0.25,
   enabledSites: { x: true, reddit: true, hn: true },
   genericSites: [],
 };
@@ -113,9 +117,13 @@ export type Response =
   // locally from the request it just sent.
   | { ok: true; type: 'enableSite' | 'disableSite'; genericSites: string[] }
   // `focus` is the setting the background actually applied, echoed so the reader panel can show the
-  // question the verdicts answer without reading Settings itself (a content script may not).
+  // question the verdicts answer without reading Settings itself (a content script may not);
+  // `highlightShare` travels the same way and for the same reason — `runReading` ranks the document
+  // with it (addendum 2026-09-23 §2.4) and cannot read Settings either. Optional, because a service
+  // worker from an older build answers without it, and `rankReading`'s own default is the right
+  // fallback there rather than a failed read.
   // `lastError` is the judge's most recent failed call (§3.1), so "65 errors" can say why.
-  | { ok: true; type: 'readPassages'; focus: string; verdicts: ReadingVerdict[]; usageTokens: number; errors: number; lastError?: string }
+  | { ok: true; type: 'readPassages'; focus: string; highlightShare?: number; verdicts: ReadingVerdict[]; usageTokens: number; errors: number; lastError?: string }
   | { ok: false; error: string };
 
 /** Wraps `chrome.runtime.sendMessage` in a Promise: resolves `{ok:false,error}` (never rejects) when

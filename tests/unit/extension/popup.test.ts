@@ -62,6 +62,7 @@ const SETTINGS: Settings = {
   strictness: 0.5,
   arbiter: true,
   focus: '',
+  highlightShare: 0.25,
   enabledSites: { x: true, reddit: true, hn: true },
   genericSites: [],
 };
@@ -940,6 +941,46 @@ describe('initPopup', () => {
       await vi.advanceTimersByTimeAsync(1);
       const patches = calls.filter((c) => c.type === 'setSettings').map((c) => (c.type === 'setSettings' ? c.patch : undefined));
       expect(patches).toEqual([{ focus: 'how is position represented' }]);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    // --- Design addendum 2026-09-23 §2.4: reading mode's own strictness, next to the focus box ---
+
+    it('fills the highlight share from settings and saves a new one immediately', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/post' }]);
+      const doc = loadDoc();
+      const calls: Request[] = [];
+      const send = makeFakeSend((req) => {
+        calls.push(req);
+        return req.type === 'getState' ? getStateResponse({ highlightShare: 0.4 }) : { ok: true, type: 'setSettings' };
+      });
+      await initPopup(doc, { send: asSend(send) });
+
+      const share = el<HTMLSelectElement>(doc, 'highlight-share');
+      expect(share.value).toBe('0.4');
+      expect([...share.options].map((o) => [o.value, o.textContent])).toEqual([
+        ['0.15', 'the top 15%'],
+        ['0.25', 'the top 25%'],
+        ['0.4', 'the top 40%'],
+      ]);
+
+      share.value = '0.15';
+      share.dispatchEvent(new Event('change'));
+      await flush();
+
+      const patches = calls.filter((c) => c.type === 'setSettings').map((c) => (c.type === 'setSettings' ? c.patch : undefined));
+      expect(patches).toEqual([{ highlightShare: 0.15 }]);
+
+      doc.dispatchEvent(new Event('unload'));
+    });
+
+    it('falls back to the default share when settings hold one the control has no option for', async () => {
+      withTabs([{ id: 7, url: 'https://example.test/post' }]);
+      const doc = loadDoc();
+      await initPopup(doc, { send: asSend(makeFakeSend((req) => (req.type === 'getState' ? getStateResponse({ highlightShare: 0.37 }) : { ok: true, type: 'setSettings' }))) });
+
+      expect(el<HTMLSelectElement>(doc, 'highlight-share').value).toBe('0.25');
 
       doc.dispatchEvent(new Event('unload'));
     });

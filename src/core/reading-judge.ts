@@ -118,7 +118,7 @@ export class ReadingJudge {
           // message`, which is honest, instead of `last error: ` with nothing after the colon.
           const message = (err instanceof Error ? err.message : String(err)).trim();
           lastError = message === '' ? undefined : message.slice(0, LAST_ERROR_MAX);
-          fanOut(at, { id: passage.id, verdict: 'plain', p: 0.5, core: 0.5, error: true });
+          fanOut(at, { id: passage.id, verdict: 'plain', p: 0.5, core: 0.5, key: 0.5, error: true });
         } finally {
           release();
         }
