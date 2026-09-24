@@ -1151,10 +1151,46 @@ describe('background', () => {
       expect(stub.tabUpdatedListenerCount()).toBe(0);
     });
 
+    // --- Fix round 1, IMPORTANT: the listener has to be armed BEFORE the navigation, and the tab asked
+    // afterwards. A page arXiv serves from the cache can be `complete` before `tabs.update` resolves —
+    // and one that fires no event at all would otherwise cost the user the full 20 s for nothing. ---
+
+    it('catches a page that reports complete before the navigation call has even returned', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const injected = spyOnExecuteScript({ state: 'started', passages: 12 });
+      // Served from the cache: the `complete` lands while `tabs.update` is still in flight.
+      stub.onTabUpdate((tabId) => stub.fireTabUpdated(tabId, 'complete'));
+
+      const pending = bg.handle({ type: 'readArxiv', ...PAPER });
+      await vi.advanceTimersByTimeAsync(1); // no clock beyond a tick: nothing here may wait on a timeout
+
+      expect(await pending).toEqual({ ok: true, type: 'readArxiv', state: 'reading', passages: 12 });
+      expect(injected).toHaveBeenCalledTimes(1);
+      expect(stub.tabUpdatedListenerCount()).toBe(0);
+    });
+
+    it('catches a tab that is already showing the paper, with no event to hear at all', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const injected = spyOnExecuteScript({ state: 'started', passages: 12 });
+      stub.setTabs([{ id: PAPER.tabId, url: HTML_URL, status: 'complete' }]);
+
+      const pending = bg.handle({ type: 'readArxiv', ...PAPER });
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await pending).toEqual({ ok: true, type: 'readArxiv', state: 'reading', passages: 12 });
+      expect(injected).toHaveBeenCalledTimes(1);
+      expect(stub.tabUpdatedListenerCount()).toBe(0);
+    });
+
     it('gives up on a page that never finishes loading, and says so', async () => {
       const bg = createBackground();
       await bg.ready;
       const injected = spyOnExecuteScript({ state: 'started', passages: 42 });
+      // The tab is `complete` — on the abstract page it has not left yet. A tab reporting some other
+      // URL is still on its way, so this must NOT count as the paper having loaded.
+      stub.setTabs([{ id: PAPER.tabId, url: 'https://arxiv.org/abs/1706.03762', status: 'complete' }]);
 
       const pending = bg.handle({ type: 'readArxiv', ...PAPER });
       await vi.advanceTimersByTimeAsync(1);
@@ -1164,6 +1200,43 @@ describe('background', () => {
       expect(await pending).toEqual({ ok: false, error: 'the arXiv page did not finish loading' });
       expect(injected).not.toHaveBeenCalled(); // nothing is injected into a page that may not be there
       expect(stub.tabUpdatedListenerCount()).toBe(0);
+    });
+
+    // --- Fix round 1, tidy-ups: what arrives in the message is checked before a tab is navigated
+    // anywhere, and an injection that reports nothing is not a read. ---
+
+    it.each(['', 'evil', '../../etc/passwd', 'https://evil.example/'])('refuses to navigate anywhere for the id %j', async (id) => {
+      const bg = createBackground();
+      await bg.ready;
+      const injected = spyOnExecuteScript({ state: 'started', passages: 42 });
+
+      const res = await bg.handle({ type: 'readArxiv', tabId: 7, id, pdfUrl: 'https://arxiv.org/pdf/x' });
+
+      expect(res).toEqual({ ok: false, error: 'not an arXiv id' });
+      expect(stub.updatedTabs()).toEqual([]);
+      expect(injected).not.toHaveBeenCalled();
+    });
+
+    it('refuses a message with no usable tab id, whatever the types promised', async () => {
+      const bg = createBackground();
+      await bg.ready;
+
+      const res = await bg.handle({ type: 'readArxiv', id: PAPER.id, pdfUrl: PAPER.pdfUrl } as unknown as Request);
+
+      expect(res).toEqual({ ok: false, error: 'not an arXiv id' });
+      expect(stub.updatedTabs()).toEqual([]);
+    });
+
+    it('falls back when the injection reports nothing at all', async () => {
+      const bg = createBackground();
+      await bg.ready;
+      const { scripting } = (globalThis as unknown as { chrome: { scripting: { executeScript(o: unknown): Promise<unknown> } } }).chrome;
+      vi.spyOn(scripting, 'executeScript').mockResolvedValue([]); // a frame that reported nothing back
+
+      const res = await readArxivWithLoad(bg);
+
+      expect(res).toEqual({ ok: true, type: 'readArxiv', state: 'fallback' });
+      expect(stub.updatedTabs().at(-1)).toEqual({ tabId: 7, url: `${EXTENSION_ORIGIN}/reader.html?src=${encodeURIComponent(PAPER.pdfUrl)}` });
     });
 
     it('reports a refused injection rather than pretending the paper is being read', async () => {

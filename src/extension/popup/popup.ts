@@ -8,7 +8,7 @@
 
 import type { DuoStats } from '../../core/duo';
 import type { QuestionPack } from '../../core/types';
-import { arxivPaperId, arxivPdfUrl } from '../arxiv';
+import { arxivId, arxivPdfUrl } from '../arxiv';
 import { BUILD_ID } from '../build-id';
 import { isBuiltInHost } from '../built-in-hosts';
 import { DEFAULT_SETTINGS, send, type PageSeenReport, type Response, type Settings } from '../messages';
@@ -67,10 +67,11 @@ function parseHttpUrl(href: string): URL | undefined {
   }
 }
 
-/** §7: a tab worth offering the PDF reader for — a `.pdf` path, or an arXiv `/pdf/<id>` URL, which
- * serves a PDF with no extension at all. */
+/** §7: a tab worth offering the PDF reader for. An arXiv `/pdf/<id>` URL serves a PDF with no extension
+ * at all, and used to be matched here too — addendum 2026-09-23 §3.1 gives it **Read this paper**
+ * instead, which is strictly better, so this is a `.pdf` path and nothing else. */
 function looksLikePdf(url: URL): boolean {
-  return /\.pdf$/i.test(url.pathname) || (url.hostname === 'arxiv.org' && url.pathname.startsWith('/pdf/'));
+  return /\.pdf$/i.test(url.pathname);
 }
 
 /** §7's status line for the injection result. `undefined` means the script ran but handed nothing
@@ -301,9 +302,9 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
       setReadStatus('not a web page');
       return;
     }
-    const paper = arxivPaperId(tabUrl) !== undefined;
-    // `looksLikePdf` matches an arXiv `/pdf/` URL too (it serves a PDF with no extension at all), and
-    // there the paper button wins: the HTML version has real paragraphs, a PDF only glyph positions.
+    const paper = arxivId(tabUrl) !== undefined;
+    // An arXiv `/pdf/<id>.pdf` URL is both; the paper button wins, because the HTML version has real
+    // paragraphs where the PDF has only glyph positions.
     const pdf = !paper && looksLikePdf(tabUrl);
     readPageBtn.hidden = pdf || paper;
     readPageBtn.disabled = false;
@@ -531,7 +532,7 @@ export async function initPopup(doc: Document, deps: { send: typeof send; active
   readArxivBtn.addEventListener(
     'click',
     guardClick([readArxivBtn], async () => {
-      const id = tabUrl === undefined ? undefined : arxivPaperId(tabUrl);
+      const id = tabUrl === undefined ? undefined : arxivId(tabUrl);
       if (id === undefined) return;
       if (tabId === undefined) {
         setReadStatus("can't read this tab: no tab id", true);

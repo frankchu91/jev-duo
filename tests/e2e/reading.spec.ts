@@ -34,11 +34,19 @@ const ACK =
   'We thank our colleagues for their comments on an earlier draft, the reviewers for their careful reading, and the maintainers of the open source libraries this work depends on.';
 const BOILER =
   'This work was supported by internal funding. The authors declare no competing interests. Correspondence should be addressed to the first author.';
+const HOUSEKEEPING =
+  'Everything reported here was measured on public documents, and the extraction code used to produce the passages is released with the paper.';
+const NO_OVERLAP =
+  'No part of the training data overlaps with the evaluation documents, which were collected after the training snapshot was frozen.';
 
 // Addendum 2026-09-23 §2: highlights are the top share of a document, ranked on `key`, so the fixtures
-// seed `key` alongside `core` — six passages the ranking must pick (descending, so the order is fixed
-// too) and two it must dim. The mock answers any question it has no fixture for from its own
-// text-overlap heuristic, which lands nowhere near the 0.5 floor for a `key` question.
+// seed `key` alongside `core` — six passages the ranking must pick and four it must dim, both sets
+// pinned so neither count nor membership depends on the mock's own heuristic.
+//
+// The mock answers a question it has no fixture for from token overlap: `p = 0.08 + 1.6 × overlap ± 0.03`,
+// so an unfixtured answer is never below 0.05. The six `key` values below are therefore the only ones
+// over the 0.5 highlight floor, and the four `core` values below are the only ones under 0.05 — which
+// is what makes "exactly these six, exactly these four" a stable assertion rather than a lucky one.
 const MOCK_FIXTURES: Record<string, Record<string, number>> = {
   [id(ABSTRACT)]: { core: 0.95, key: 0.95 },
   [id(METHOD)]: { core: 0.95, key: 0.94 },
@@ -46,14 +54,16 @@ const MOCK_FIXTURES: Record<string, Record<string, number>> = {
   [id(POSITIONAL)]: { core: 0.9, key: 0.92 },
   [id(ABLATION)]: { core: 0.9, key: 0.91 },
   [id(CLAIM)]: { core: 0.9, key: 0.9 },
-  [id(ACK)]: { core: 0.02, key: 0.03 },
+  [id(ACK)]: { core: 0.01, key: 0.03 },
   [id(BOILER)]: { core: 0.02, key: 0.03 },
+  [id(HOUSEKEEPING)]: { core: 0.03, key: 0.04 },
+  [id(NO_OVERLAP)]: { core: 0.04, key: 0.04 },
 };
 
 /** Math.ceil(21 × HIGHLIGHT_SHARE) over the article fixture's 21 passages. */
-const EXPECTED_HIGHLIGHTS = 6;
-/** Math.floor(21 × DIM_SHARE): the two pinned dims plus the two lowest-scoring paragraphs after them. */
-const EXPECTED_DIMS = 4;
+const EXPECTED_HIGHLIGHTS = ['#p-abstract', '#p-intro-3', '#p-method-1', '#p-method-2', '#p-results-2', '#p-results-4'];
+/** Math.floor(21 × DIM_SHARE), in ascending `core` order: the four lowest, all pinned above. */
+const EXPECTED_DIMS = ['#p-ack', '#p-boiler', '#p-intro-5', '#p-method-5'];
 
 test.describe.configure({ mode: 'serial' });
 
@@ -84,19 +94,17 @@ test('Read this page highlights, dims, lists and then stops', async () => {
   // finished run rather than a mid-flight snapshot.
   await expect(article.locator('#jd-reader .progress')).toHaveText(/^21 passages · /);
 
-  // The six pinned highlights — exactly the top share of the document by `key` — and the two pinned
-  // dims. The tag carries the probability the passage was RANKED on, which is now `key`.
-  await expect(article.locator('.jd-hl')).toHaveCount(EXPECTED_HIGHLIGHTS);
-  for (const pinned of ['#p-abstract', '#p-method-1', '#p-method-2', '#p-intro-3', '#p-results-2', '#p-results-4']) {
-    await expect(article.locator(pinned)).toHaveClass(/jd-hl/);
-  }
-  await expect(article.locator('#p-ack')).toHaveClass(/jd-dim/);
-  await expect(article.locator('#p-boiler')).toHaveClass(/jd-dim/);
-  await expect(article.locator('.jd-dim')).toHaveCount(EXPECTED_DIMS);
+  // Exactly the top share of the document by `key`, and exactly the least substantive fifth by `core`:
+  // both sets pinned by the fixtures above, so these are identities and not bounds. The tag carries the
+  // probability the passage was RANKED on, which is now `key`.
+  await expect(article.locator('.jd-hl')).toHaveCount(EXPECTED_HIGHLIGHTS.length);
+  for (const pinned of EXPECTED_HIGHLIGHTS) await expect(article.locator(pinned)).toHaveClass(/jd-hl/);
+  await expect(article.locator('.jd-dim')).toHaveCount(EXPECTED_DIMS.length);
+  for (const pinned of EXPECTED_DIMS) await expect(article.locator(pinned)).toHaveClass(/jd-dim/);
   await expect(article.locator('#p-abstract .jd-rtag')).toHaveText(/95%$/);
 
   // Playwright's CSS engine pierces the panel's open shadow root, so the list is addressable here.
-  await expect(article.locator('#jd-reader ol li')).toHaveCount(EXPECTED_HIGHLIGHTS);
+  await expect(article.locator('#jd-reader ol li')).toHaveCount(EXPECTED_HIGHLIGHTS.length);
 
   await article.getByRole('button', { name: 'Show all' }).click();
   await expect(article.locator('.jd-dim')).toHaveCount(0);

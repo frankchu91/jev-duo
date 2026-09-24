@@ -1,48 +1,14 @@
 // @vitest-environment jsdom
 //
-// Unit coverage for reader.ts's PURE pieces only (status text, URL/src validation, arXiv detection) —
+// Unit coverage for reader.ts's PURE pieces only (status text, URL/src validation) — recognising an
+// arXiv paper URL moved to src/extension/arxiv.ts, which the popup shares, and is covered there —
 // importing the module here never touches chrome.*, fetch or pdf.js, because `wireUp()` only runs when
 // `typeof chrome !== 'undefined'` (see reader.ts's guard at the bottom), and this file never installs a
 // chrome stub. The page it BUILDS is covered in reader-pages.test.ts; everything that loads, fetches,
 // asks for a permission or judges is exercised end-to-end in tests/e2e/reading.spec.ts.
 
 import { describe, expect, it } from 'vitest';
-import { arxivHtmlUrl, errMessage, isFetchableUrl, NO_TEXT_STATUS, NOT_A_PDF_URL_STATUS, parseErrorStatus } from '../../../src/extension/reader/reader';
-
-describe('arxivHtmlUrl', () => {
-  it('a bare arXiv id becomes the HTML twin', () => {
-    expect(arxivHtmlUrl('https://arxiv.org/pdf/1706.03762')).toBe('https://arxiv.org/html/1706.03762');
-  });
-
-  it('a versioned id with a .pdf suffix keeps its version and drops the suffix', () => {
-    expect(arxivHtmlUrl('https://arxiv.org/pdf/1706.03762v7.pdf')).toBe('https://arxiv.org/html/1706.03762v7');
-  });
-
-  it('a non-arXiv host is not rewritten', () => {
-    expect(arxivHtmlUrl('https://example.com/pdf/1706.03762')).toBeUndefined();
-  });
-
-  it('/pdf/ alone has no id to rewrite', () => {
-    expect(arxivHtmlUrl('https://arxiv.org/pdf/')).toBeUndefined();
-  });
-
-  it('an arXiv URL outside /pdf/ is not a PDF link at all', () => {
-    expect(arxivHtmlUrl('https://arxiv.org/abs/1706.03762')).toBeUndefined();
-  });
-
-  it('an unparseable URL is rejected rather than thrown', () => {
-    expect(arxivHtmlUrl('not a url')).toBeUndefined();
-  });
-
-  it('a lookalike subdomain is not arxiv.org itself', () => {
-    expect(arxivHtmlUrl('https://arxiv.org.evil.example/pdf/1706.03762')).toBeUndefined();
-  });
-
-  it('reads hostname, not host: an explicit port does not defeat the match (mirrors the popup gate)', () => {
-    // .host would be "arxiv.org:8443", which !== 'arxiv.org' — the bug this regression-tests for.
-    expect(arxivHtmlUrl('https://arxiv.org:8443/pdf/1706.03762')).toBe('https://arxiv.org/html/1706.03762');
-  });
-});
+import { errMessage, isFetchableUrl, NO_TEXT_STATUS, NOT_A_PDF_URL_STATUS, parseErrorStatus } from '../../../src/extension/reader/reader';
 
 describe('isFetchableUrl', () => {
   it.each([

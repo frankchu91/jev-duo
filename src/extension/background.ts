@@ -25,7 +25,7 @@ import type { JevProvider, LlmProvider } from '../core/providers/types';
 import { ReadingJudge } from '../core/reading-judge';
 import { MAX_PASSAGES, type DocContext, type Passage } from '../core/reading';
 import type { Example, Item, QuestionPack, Verdict } from '../core/types';
-import { arxivHtmlUrl } from './arxiv';
+import { arxivHtmlUrl, isArxivId } from './arxiv';
 import { BUILD_ID } from './build-id';
 import type { PagePlatform, PageSeenReport, Request, Response, Sender, Settings } from './messages';
 import type { ReadResult } from './read-page';
@@ -88,15 +88,23 @@ function resolveForSettings(settings: Settings, fetchImpl?: typeof fetch): Resol
  * and saying so, rather than injecting into a page that may not be there yet. */
 const ARXIV_LOAD_TIMEOUT_MS = 20_000;
 
-/** Resolves true once Chrome reports `status: 'complete'` for `tabId`, false if that takes longer than
- * `timeoutMs`. The listener is removed either way — a service worker that accumulated one per read
- * would keep being woken by every navigation in every tab for the rest of its life. */
-function waitForTabComplete(tabId: number, timeoutMs = ARXIV_LOAD_TIMEOUT_MS): Promise<boolean> {
-  return new Promise((resolve) => {
-    const settle = (loaded: boolean): void => {
+/** Navigates `tabId` to `url` and resolves true once it has finished loading, false if that takes longer
+ * than `timeoutMs`. The listener is removed either way — a service worker that accumulated one per read
+ * would keep being woken by every navigation in every tab for the rest of its life.
+ *
+ * The order matters twice over. The listener is armed BEFORE the navigation, because a page arXiv serves
+ * from its cache can reach `complete` before `tabs.update` has even resolved, and an event nobody was
+ * listening for is gone for good. And the tab is ASKED afterwards, because a navigation that fires no
+ * event at all (a tab already showing that exact URL) would otherwise cost the full timeout for a page
+ * that is sitting there ready. A tab reporting some other URL is still on its way — or was redirected,
+ * which arXiv does for a version-less id — and the listener is what catches that. */
+async function navigateAndWaitForLoad(tabId: number, url: string, timeoutMs = ARXIV_LOAD_TIMEOUT_MS): Promise<boolean> {
+  let settleNow: ((loaded: boolean) => void) | undefined;
+  const loaded = new Promise<boolean>((resolve) => {
+    const settle = (isLoaded: boolean): void => {
       clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve(loaded);
+      resolve(isLoaded);
     };
     // Every other tab's navigations arrive here too, and so does this one's `status: 'loading'`.
     const listener = (updatedTabId: number, change: { status?: string }): void => {
@@ -104,7 +112,19 @@ function waitForTabComplete(tabId: number, timeoutMs = ARXIV_LOAD_TIMEOUT_MS): P
     };
     const timer = setTimeout(() => settle(false), timeoutMs);
     chrome.tabs.onUpdated.addListener(listener);
+    // The executor runs synchronously, so this is set before the navigation below is even issued.
+    settleNow = settle;
   });
+
+  await chrome.tabs.update(tabId, { url });
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab?.status === 'complete' && tab.url === url) settleNow?.(true);
+  } catch {
+    // A tab that has gone away answers nothing. The wait above (and its timeout) still governs, and
+    // `executeScript` would fail for the same reason a moment later anyway.
+  }
+  return loaded;
 }
 
 /** Order-sensitive equality for two origin lists: `reconcileSites` returns a sorted list, so a stored
@@ -320,8 +340,11 @@ export function createBackground(deps: { fetchImpl?: typeof fetch } = {}): { han
    * No host permission is needed for any of it: the click granted `activeTab` for this tab, and Chrome
    * keeps that grant across a same-origin navigation, which arxiv.org -> arxiv.org is. */
   async function handleReadArxiv(tabId: number, id: string, pdfUrl: string): Promise<Response> {
-    await chrome.tabs.update(tabId, { url: arxivHtmlUrl(id) });
-    if (!(await waitForTabComplete(tabId))) return { ok: false, error: 'the arXiv page did not finish loading' };
+    // The Request type says a number and an id, but nothing except TypeScript enforces that on a
+    // message: "navigate this tab to https://arxiv.org/html/<anything>" is not something to do on
+    // trust, so both are checked before any tab goes anywhere.
+    if (typeof tabId !== 'number' || !isArxivId(id)) return { ok: false, error: 'not an arXiv id' };
+    if (!(await navigateAndWaitForLoad(tabId, arxivHtmlUrl(id)))) return { ok: false, error: 'the arXiv page did not finish loading' };
 
     let result: ReadResult | undefined;
     try {

@@ -195,6 +195,20 @@ describe('rankReading', () => {
     expect(count(ranked, 'dim')).toBe(0); // the quota is 1, but 0.55 is over DIM_CEILING
   });
 
+  // Fix round 1: a document where the salience answers come back identical still has to pick somebody,
+  // and it picks on substance — then, failing that, on where the passage sits in the document.
+  it('breaks a tie on the score with core, and a tie on both with document order', () => {
+    const ranked = rankReading(
+      [judged('rd:0', 0.6, 0.8), judged('rd:1', 0.9, 0.8), judged('rd:2', 0.9, 0.8), judged('rd:3', 0.7, 0.8)],
+      false,
+    );
+
+    // ceil(4 × 0.25) = 1 slot: the highest core takes it, and of the two passages tied at 0.9 the
+    // earlier one does.
+    expect(idsOf(ranked, 'highlight')).toEqual(['rd:1']);
+    expect(ranked[1].p).toBe(0.8);
+  });
+
   it('a lone passage worth reading is highlighted, and a lone unremarkable one is plain', () => {
     expect(kinds(rankReading([judged('rd:0', 0.8, 0.9)], false))).toEqual(['highlight']);
     expect(kinds(rankReading([judged('rd:0', 0.8, 0.3)], false))).toEqual(['plain']);

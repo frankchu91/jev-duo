@@ -7,13 +7,15 @@
 // The PDF bytes never leave the browser (§11): only the extracted passages, the title and the lead
 // are ever sent, to the same provider the rest of the extension uses.
 //
-// The pure pieces below (status text, `isFetchableUrl`, `arxivHtmlUrl`) are exported and unit-tested
-// directly (tests/unit/extension/reader-page.test.ts, jsdom, no chrome stub needed); the page they
+// The pure pieces below (status text, `isFetchableUrl`) are exported and unit-tested directly
+// (tests/unit/extension/reader-page.test.ts, jsdom, no chrome stub needed); recognising an arXiv paper
+// URL is `../arxiv.ts`'s job, and only its job, so this page and the popup agree; the page they
 // build lives in ./pages.ts and is tested the same way. Everything that touches chrome.*, fetch or
 // pdf.js lives inside `wireUp`, called only when this is really running as the extension page.
 
 import * as pdfjsLib from 'pdfjs-dist';
 import { LEAD_MAX, TITLE_MAX, type DocContext } from '../../core/reading';
+import { arxivHtmlTwin } from '../arxiv';
 import { send } from '../messages';
 import type { ArticlePassage } from '../reading/article';
 import { openPdf, type OpenedPdf, type PdfAssets, type PdfjsLike } from '../reading/pdf-load';
@@ -50,22 +52,6 @@ export function isFetchableUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** arXiv's `/pdf/<id>` has an HTML twin at `/html/<id>` that keeps real paragraphs; a PDF only has
- * glyph positions. `<id>` is the rest of the path exactly as given, minus a trailing `.pdf`. Reads
- * `url.hostname` (not `.host`, which would also carry a port) so this gate cannot drift from the
- * popup's `looksLikePdf`, which gates the same way on the same field. */
-export function arxivHtmlUrl(raw: string): string | undefined {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return undefined;
-  }
-  if (url.hostname !== 'arxiv.org' || !url.pathname.startsWith('/pdf/')) return undefined;
-  const id = url.pathname.slice('/pdf/'.length).replace(/\.pdf$/i, '');
-  return id === '' ? undefined : `https://arxiv.org/html/${id}`;
 }
 
 /** §5.3's runtime assets, from the extension's own origin: the standard 14 fonts so a PDF set in Times
@@ -122,7 +108,7 @@ function wireUp(): void {
   }
 
   function renderHint(): void {
-    const html = src === undefined ? undefined : arxivHtmlUrl(src);
+    const html = src === undefined ? undefined : arxivHtmlTwin(src);
     if (!html) {
       hintEl.hidden = true;
       return;

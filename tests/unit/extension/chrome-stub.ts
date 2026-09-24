@@ -47,9 +47,11 @@ export interface ChromeStub {
    * `chrome.runtime.sendMessage` itself cannot express (it always reports the real caller). Used to
    * exercise background.ts's "this came from a content script" path. */
   dispatch(message: unknown, sender: unknown): Promise<unknown>;
-  /** What `chrome.tabs.query` resolves to; the popup reads `[0].id` (to pick its tab's page-seen
-   * report) and `[0].url` (to drive the This-site section — readable thanks to `activeTab`). */
-  setTabs(tabs: Array<{ id?: number; url?: string; title?: string }>): void;
+  /** What `chrome.tabs.query` resolves to, and what `chrome.tabs.get(id)` answers with; the popup reads
+   * `[0].id` (to pick its tab's page-seen report) and `[0].url` (to drive the This-site section —
+   * readable thanks to `activeTab`), and the background reads `status`/`url` to tell whether a tab it
+   * just navigated has already finished loading. */
+  setTabs(tabs: Array<{ id?: number; url?: string; title?: string; status?: string }>): void;
   /** Makes the NEXT `chrome.permissions.request(...)` call resolve `false` (as if the user dismissed
    * Chrome's own permission prompt) without granting anything, then reverts to the default (grant
    * whatever was asked). One-shot, mirroring how a test drives one specific click. */
@@ -66,12 +68,16 @@ export interface ChromeStub {
   /** How many `onUpdated` listeners are still registered: how a test sees one being removed again
    * rather than left behind for the life of the service worker. */
   tabUpdatedListenerCount(): number;
+  /** Runs `fn` synchronously INSIDE every later `chrome.tabs.update` call, before its promise resolves.
+   * That is where a cached page's `complete` really lands, and the only way a test can put it there. */
+  onTabUpdate(fn: (tabId: number, url: string) => void): void;
 }
 
 export function installChromeStub(): ChromeStub {
   const listeners: Listener[] = [];
   let lastError: { message: string } | undefined;
-  let tabs: Array<{ id?: number; url?: string; title?: string }> = [];
+  let tabs: Array<{ id?: number; url?: string; title?: string; status?: string }> = [];
+  let updateHook: ((tabId: number, url: string) => void) | undefined;
   const createdTabs: string[] = [];
   const updatedTabs: Array<{ tabId: number; url: string }> = [];
   const tabUpdatedListeners: TabUpdatedListener[] = [];
@@ -175,8 +181,15 @@ export function installChromeStub(): ChromeStub {
     tabs: {
       /** `query({url})` is how the popup's `?jd-tab=` hook names a tab instead of taking the active
        * one; every other query answers with whatever `setTabs` was given. */
-      async query(info?: { url?: string }): Promise<Array<{ id?: number; url?: string; title?: string }>> {
+      async query(info?: { url?: string }): Promise<Array<{ id?: number; url?: string; title?: string; status?: string }>> {
         return info?.url === undefined ? tabs : tabs.filter((t) => t.url === info.url);
+      },
+      /** Rejects for an unknown id, exactly as Chrome does for a tab that has gone away — which is why
+       * every caller here has to cope with that rather than assume a tab. */
+      async get(tabId: number): Promise<{ id?: number; url?: string; status?: string }> {
+        const found = tabs.find((t) => t.id === tabId);
+        if (!found) throw new Error(`jev-duo chrome stub: no tab with id ${tabId}`);
+        return found;
       },
       async create(props: { url: string }): Promise<{ id: number }> {
         createdTabs.push(props.url);
@@ -184,6 +197,7 @@ export function installChromeStub(): ChromeStub {
       },
       async update(tabId: number, props: { url?: string }): Promise<{ id: number; url?: string }> {
         updatedTabs.push({ tabId, url: props.url ?? '' });
+        updateHook?.(tabId, props.url ?? ''); // still inside the call: the navigation has not "returned" yet
         return { id: tabId, url: props.url };
       },
       /** Nothing is fired on its own: a navigation only ever "progresses" when a test says so, through
@@ -226,5 +240,8 @@ export function installChromeStub(): ChromeStub {
       for (const listener of [...tabUpdatedListeners]) listener(tabId, { status }, { id: tabId });
     },
     tabUpdatedListenerCount: () => tabUpdatedListeners.length,
+    onTabUpdate(fn) {
+      updateHook = fn;
+    },
   };
 }
